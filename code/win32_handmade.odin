@@ -27,6 +27,8 @@ SAMPLESPERCYCLE: DWORD : SAMPLESPERSEC / cast(DWORD)CYCLESPERSEC
 AUDIOBUFFERSIZEINSAMPLES: DWORD : SAMPLESPERCYCLE * cast(DWORD)AUDIOBUFFERSIZEINCYCLES
 AUDIOBUFFERSIZEINBYTES: DWORD : AUDIOBUFFERSIZEINSAMPLES * cast(DWORD)(BITSPERSAMPLE / 8)
 
+xaudio2: ^xa2.IXAudio2
+sound_buffer: [^]byte
 
 // TODO(Kevin): This is a global for now
 RUNNING: bool = false
@@ -119,6 +121,64 @@ win32_copy_buffer_to_window :: proc "stdcall" (
 		win.DIB_RGB_COLORS,
 		win.SRCCOPY,
 	)
+}
+
+hresult := xa2.Create(&xaudio2, {xa2.FLAGS.DEBUG_ENGINE}, xa2.USE_DEFAULT_PROCESSOR)
+win32_init_xaudio2 :: proc() {
+	if win.FAILED(hresult) {win.OutputDebugStringA("Failed to init XAudio2"); return}
+
+	p_xaudio2_mastering_voice: ^xa2.IXAudio2MasteringVoice
+
+	hresult = xaudio2.CreateMasteringVoice(xaudio2, &p_xaudio2_mastering_voice)
+	if win.FAILED(
+		hresult,
+	) {win.OutputDebugStringA("Failed to init IXAudio2MasteringVoice"); return}
+
+	wave_format: win.WAVEFORMATEX
+	wave_format.wFormatTag = win.WAVE_FORMAT_PCM
+	wave_format.nChannels = 1
+	wave_format.nSamplesPerSec = SAMPLESPERSEC
+	wave_format.nBlockAlign = wave_format.nChannels * BITSPERSAMPLE / 8
+	wave_format.nAvgBytesPerSec = wave_format.nSamplesPerSec * DWORD(wave_format.nBlockAlign)
+	wave_format.wBitsPerSample = BITSPERSAMPLE
+	wave_format.cbSize = 0
+
+	p_xaudio2_source_voice: ^xa2.IXAudio2SourceVoice
+
+	hresult = xaudio2.CreateSourceVoice(xaudio2, &p_xaudio2_source_voice, &wave_format)
+	if win.FAILED(hresult) {win.OutputDebugStringA("Failed to init IXAudio2SourceVoice"); return}
+
+	sound_buffer = cast([^]byte)win.VirtualAlloc(
+		nil,
+		cast(win.SIZE_T)AUDIOBUFFERSIZEINBYTES,
+		win.MEM_COMMIT,
+		win.PAGE_READWRITE,
+	)
+	phase: DOUBLE = 0.0
+	buffer_index: u32 = 0
+	for buffer_index < AUDIOBUFFERSIZEINBYTES {
+		phase += (2.0 * PI) / cast(DOUBLE)SAMPLESPERCYCLE
+		sample := i16(math.sin(phase) * 32767.0 * VOLUME)
+		sound_buffer[buffer_index] = byte(sample & 0xFF)
+		sound_buffer[buffer_index + 1] = byte((sample >> 8) & 0xFF)
+		buffer_index += 2
+	}
+
+	xaudio2_buffer: xa2.BUFFER
+	xaudio2_buffer.Flags = {}
+	xaudio2_buffer.AudioBytes = AUDIOBUFFERSIZEINBYTES
+	xaudio2_buffer.pAudioData = sound_buffer
+	xaudio2_buffer.LoopCount = xa2.LOOP_INFINITE
+
+	hresult = p_xaudio2_source_voice.SubmitSourceBuffer(
+		p_xaudio2_source_voice,
+		&xaudio2_buffer,
+		nil,
+	)
+	if win.FAILED(hresult) {win.OutputDebugStringA("SubmitSourceBuffer failed\n"); return}
+
+	hresult = p_xaudio2_source_voice.Start(p_xaudio2_source_voice, {}, xa2.COMMIT_NOW)
+	if win.FAILED(hresult) {win.OutputDebugStringA("Start failed\n"); return}
 }
 
 win32_main_window_callback :: proc "stdcall" (
@@ -216,7 +276,6 @@ main :: proc() {
 	instance := win.HINSTANCE(win.GetModuleHandleW(nil))
 	assert(instance != nil, "Failed to fetch hInstance.")
 
-
 	lpCmdLine := win.GetCommandLineW()
 
 	cls := win.WNDCLASSW {
@@ -247,64 +306,8 @@ main :: proc() {
 
 	hr := win.CoInitializeEx(nil, .MULTITHREADED)
 	assert(win.SUCCEEDED(hr), "CoInitializeEx failed")
-	xaudio2: ^xa2.IXAudio2
 
-	hresult := xa2.Create(&xaudio2, {xa2.FLAGS.DEBUG_ENGINE}, xa2.USE_DEFAULT_PROCESSOR)
-	if win.FAILED(hresult) {win.OutputDebugStringA("Failed to init XAudio2"); return}
-
-	p_xaudio2_mastering_voice: ^xa2.IXAudio2MasteringVoice
-
-	hresult = xaudio2.CreateMasteringVoice(xaudio2, &p_xaudio2_mastering_voice)
-	if win.FAILED(
-		hresult,
-	) {win.OutputDebugStringA("Failed to init IXAudio2MasteringVoice"); return}
-
-	wave_format: win.WAVEFORMATEX
-	wave_format.wFormatTag = win.WAVE_FORMAT_PCM
-	wave_format.nChannels = 1
-	wave_format.nSamplesPerSec = SAMPLESPERSEC
-	wave_format.nBlockAlign = wave_format.nChannels * BITSPERSAMPLE / 8
-	wave_format.nAvgBytesPerSec = wave_format.nSamplesPerSec * DWORD(wave_format.nBlockAlign)
-	wave_format.wBitsPerSample = BITSPERSAMPLE
-	wave_format.cbSize = 0
-
-	p_xaudio2_source_voice: ^xa2.IXAudio2SourceVoice
-
-	hresult = xaudio2.CreateSourceVoice(xaudio2, &p_xaudio2_source_voice, &wave_format)
-	if win.FAILED(hresult) {win.OutputDebugStringA("Failed to init IXAudio2SourceVoice"); return}
-
-	buffer := cast([^]byte)win.VirtualAlloc(
-		nil,
-		cast(win.SIZE_T)AUDIOBUFFERSIZEINBYTES,
-		win.MEM_COMMIT,
-		win.PAGE_READWRITE,
-	)
-	phase: DOUBLE = 0.0
-	buffer_index: u32 = 0
-	for buffer_index < AUDIOBUFFERSIZEINBYTES {
-		phase += (2.0 * PI) / cast(DOUBLE)SAMPLESPERCYCLE
-		sample := i16(math.sin(phase) * 32767.0 * VOLUME)
-		buffer[buffer_index] = byte(sample & 0xFF)
-		buffer[buffer_index + 1] = byte((sample >> 8) & 0xFF)
-		buffer_index += 2
-	}
-
-	xaudio2_buffer: xa2.BUFFER
-	xaudio2_buffer.Flags = {}
-	xaudio2_buffer.AudioBytes = AUDIOBUFFERSIZEINBYTES
-	xaudio2_buffer.pAudioData = buffer
-	xaudio2_buffer.LoopCount = xa2.LOOP_INFINITE
-
-	hresult = p_xaudio2_source_voice.SubmitSourceBuffer(
-		p_xaudio2_source_voice,
-		&xaudio2_buffer,
-		nil,
-	)
-	if win.FAILED(hresult) {win.OutputDebugStringA("SubmitSourceBuffer failed\n"); return}
-
-	hresult = p_xaudio2_source_voice.Start(p_xaudio2_source_voice, {}, xa2.COMMIT_NOW)
-	if win.FAILED(hresult) {win.OutputDebugStringA("Start failed\n"); return}
-
+	win32_init_xaudio2()
 	win32_resize_dib_section(&bitmap_buffer, 1280, 720)
 
 	msg: win.MSG
@@ -362,9 +365,10 @@ main :: proc() {
 		)
 	}
 
-	win.VirtualFree(&buffer, 0, win.MEM_RELEASE)
-
+	// Release XAudio2 resources
+	win.VirtualFree(&sound_buffer, 0, win.MEM_RELEASE)
 	win.CoUninitialize()
 	xaudio2.Release(xaudio2)
+
 	os.exit(cast(int)msg.wParam)
 }
