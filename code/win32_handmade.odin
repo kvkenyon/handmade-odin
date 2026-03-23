@@ -1,17 +1,36 @@
 package main
 
 import "base:runtime"
+import "core:math"
 import os "core:os"
 import win "core:sys/windows"
-
+import xa2 "vendor:windows/XAudio2"
 
 LONG :: win.LONG
 INT :: win.INT
+WORD :: win.WORD
+DWORD :: win.DWORD
+WIN32_UINT32 :: win.UINT32
+DOUBLE :: f64
 
 CLASS_NAME :: "HandmadeHeroWindowClass"
 
+// XAudio2
+BITSPERSAMPLE: WORD : 16
+SAMPLESPERSEC: DWORD : 44100
+CYCLESPERSEC: DOUBLE : 220.0
+VOLUME: DOUBLE : 0.5
+AUDIOBUFFERSIZEINCYCLES: WORD : 10
+PI: DOUBLE : 3.14159265358979323846
+
+SAMPLESPERCYCLE: DWORD : SAMPLESPERSEC / cast(DWORD)CYCLESPERSEC
+AUDIOBUFFERSIZEINSAMPLES: DWORD : SAMPLESPERCYCLE * cast(DWORD)AUDIOBUFFERSIZEINCYCLES
+AUDIOBUFFERSIZEINBYTES: DWORD : AUDIOBUFFERSIZEINSAMPLES * cast(DWORD)(BITSPERSAMPLE / 8)
+
+
 // TODO(Kevin): This is a global for now
 RUNNING: bool = false
+y_offset: INT = 0
 
 Win32OffscreenBuffer :: struct {
 	info:            win.BITMAPINFO,
@@ -20,7 +39,6 @@ Win32OffscreenBuffer :: struct {
 	height:          LONG,
 	bytes_per_pixel: INT,
 }
-
 
 bitmap_buffer := Win32OffscreenBuffer{}
 
@@ -32,7 +50,7 @@ win32_get_window_dimensions :: proc "stdcall" (window: win.HWND) -> (width: INT,
 	return
 }
 
-render_gradient :: proc "std" (buffer: ^Win32OffscreenBuffer, x_offset: INT, y_offset: INT) {
+render_gradient :: proc "stdcall" (buffer: ^Win32OffscreenBuffer, x_offset: INT, y_offset: INT) {
 	bitmap_memory32 := cast([^]u32)buffer.memory
 	for y in 0 ..< buffer.height {
 		row_idx := y * buffer.width
@@ -40,8 +58,8 @@ render_gradient :: proc "std" (buffer: ^Win32OffscreenBuffer, x_offset: INT, y_o
 		row := bitmap_memory32[row_idx:offset]
 		for x in 0 ..< buffer.width {
 			// 0x00RRGGBB
-			blue := cast(u32)(x_offset + x)
-			green := cast(u32)(y_offset + y) << 8
+			blue := cast(u32)(u8(x_offset + x))
+			green := cast(u32)(u8(y_offset + y)) << 8
 			row[x] = blue | green
 		}
 	}
@@ -62,14 +80,14 @@ win32_resize_dib_section :: proc "stdcall" (
 
 	buffer.info.bmiHeader.biSize = size_of(buffer.info.bmiHeader)
 	buffer.info.bmiHeader.biWidth = width
-	// If biHeight is negative, the bitmap is a top-down DIB with the origin at the upper left corner.
+	// If biHeight is negative, the bitmap is a top-down DIB width
+	// the origin at the upper left corner.
 	buffer.info.bmiHeader.biHeight = -height
 	buffer.info.bmiHeader.biPlanes = 1
 	buffer.info.bmiHeader.biBitCount = 32
 	buffer.info.bmiHeader.biCompression = win.BI_RGB
 
 	bitmap_memory_size := (width * height) * buffer.bytes_per_pixel
-
 	buffer.memory = win.VirtualAlloc(
 		nil,
 		cast(win.SIZE_T)bitmap_memory_size,
@@ -103,7 +121,6 @@ win32_copy_buffer_to_window :: proc "stdcall" (
 	)
 }
 
-
 win32_main_window_callback :: proc "stdcall" (
 	window: win.HWND,
 	msg: win.UINT,
@@ -128,6 +145,66 @@ win32_main_window_callback :: proc "stdcall" (
 		win.EndPaint(window, &p)
 	case win.WM_ACTIVATEAPP:
 		win.OutputDebugStringA("WM_ACTIVATEAPP\n")
+	case win.WM_SYSKEYUP:
+		fallthrough
+	case win.WM_SYSKEYDOWN:
+		fallthrough
+	case win.WM_KEYUP:
+		fallthrough
+	case win.WM_KEYDOWN:
+		vk_code := win.LOWORD(wparam)
+		key_flags := win.HIWORD(lparam)
+		was_key_down := (key_flags & win.KF_REPEAT) == win.KF_REPEAT
+		is_key_released := (key_flags & win.KF_UP) == win.KF_UP
+		alt_key_down := (key_flags & win.KF_ALTDOWN) == win.KF_ALTDOWN
+		repeat_count := win.LOWORD(lparam)
+		switch (vk_code) {
+		case win.VK_LEFT:
+		case win.VK_RIGHT:
+		case win.VK_UP:
+		case win.VK_DOWN:
+		case win.VK_F4:
+			if alt_key_down do RUNNING = false
+		case win.VK_SPACE:
+			win.OutputDebugStringA("Spacebar: ")
+			if was_key_down {
+				win.OutputDebugStringA("WasDown ")
+			}
+			if is_key_released {
+				win.OutputDebugStringA("WasReleased")
+			}
+			win.OutputDebugStringA("\n")
+		case win.VK_ESCAPE:
+			win.OutputDebugStringA("Escape: ")
+			if was_key_down {
+				win.OutputDebugStringA("WasDown ")
+			}
+			if is_key_released {
+				win.OutputDebugStringA("WasReleased")
+			}
+			win.OutputDebugStringA("\n")
+		case 'W':
+			win.OutputDebugStringA("W: ")
+			if was_key_down {
+				win.OutputDebugStringA("WasDown ")
+			}
+			if is_key_released {
+				win.OutputDebugStringA("WasReleased")
+			}
+			win.OutputDebugStringA("\n")
+		case 'A':
+			win.OutputDebugStringA("A\n")
+		case 'S':
+			win.OutputDebugStringA("S\n")
+		case 'D':
+			win.OutputDebugStringA("D\n")
+		case 'Q':
+			win.OutputDebugStringA("Q\n")
+		case 'E':
+			win.OutputDebugStringA("E\n")
+		case:
+			break
+		}
 	case:
 		result = win.DefWindowProcW(window, msg, wparam, lparam)
 	}
@@ -138,6 +215,7 @@ win32_main_window_callback :: proc "stdcall" (
 main :: proc() {
 	instance := win.HINSTANCE(win.GetModuleHandleW(nil))
 	assert(instance != nil, "Failed to fetch hInstance.")
+
 
 	lpCmdLine := win.GetCommandLineW()
 
@@ -167,18 +245,106 @@ main :: proc() {
 
 	assert(window != nil, "Window creation Failed")
 
+	hr := win.CoInitializeEx(nil, .MULTITHREADED)
+	assert(win.SUCCEEDED(hr), "CoInitializeEx failed")
+	xaudio2: ^xa2.IXAudio2
+
+	hresult := xa2.Create(&xaudio2, {xa2.FLAGS.DEBUG_ENGINE}, xa2.USE_DEFAULT_PROCESSOR)
+	if win.FAILED(hresult) {win.OutputDebugStringA("Failed to init XAudio2"); return}
+
+	p_xaudio2_mastering_voice: ^xa2.IXAudio2MasteringVoice
+
+	hresult = xaudio2.CreateMasteringVoice(xaudio2, &p_xaudio2_mastering_voice)
+	if win.FAILED(
+		hresult,
+	) {win.OutputDebugStringA("Failed to init IXAudio2MasteringVoice"); return}
+
+	wave_format: win.WAVEFORMATEX
+	wave_format.wFormatTag = win.WAVE_FORMAT_PCM
+	wave_format.nChannels = 1
+	wave_format.nSamplesPerSec = SAMPLESPERSEC
+	wave_format.nBlockAlign = wave_format.nChannels * BITSPERSAMPLE / 8
+	wave_format.nAvgBytesPerSec = wave_format.nSamplesPerSec * DWORD(wave_format.nBlockAlign)
+	wave_format.wBitsPerSample = BITSPERSAMPLE
+	wave_format.cbSize = 0
+
+	p_xaudio2_source_voice: ^xa2.IXAudio2SourceVoice
+
+	hresult = xaudio2.CreateSourceVoice(xaudio2, &p_xaudio2_source_voice, &wave_format)
+	if win.FAILED(hresult) {win.OutputDebugStringA("Failed to init IXAudio2SourceVoice"); return}
+
+	buffer := cast([^]byte)win.VirtualAlloc(
+		nil,
+		cast(win.SIZE_T)AUDIOBUFFERSIZEINBYTES,
+		win.MEM_COMMIT,
+		win.PAGE_READWRITE,
+	)
+	phase: DOUBLE = 0.0
+	buffer_index: u32 = 0
+	for buffer_index < AUDIOBUFFERSIZEINBYTES {
+		phase += (2.0 * PI) / cast(DOUBLE)SAMPLESPERCYCLE
+		sample := i16(math.sin(phase) * 32767.0 * VOLUME)
+		buffer[buffer_index] = byte(sample & 0xFF)
+		buffer[buffer_index + 1] = byte((sample >> 8) & 0xFF)
+		buffer_index += 2
+	}
+
+	xaudio2_buffer: xa2.BUFFER
+	xaudio2_buffer.Flags = {}
+	xaudio2_buffer.AudioBytes = AUDIOBUFFERSIZEINBYTES
+	xaudio2_buffer.pAudioData = buffer
+	xaudio2_buffer.LoopCount = xa2.LOOP_INFINITE
+
+	hresult = p_xaudio2_source_voice.SubmitSourceBuffer(
+		p_xaudio2_source_voice,
+		&xaudio2_buffer,
+		nil,
+	)
+	if win.FAILED(hresult) {win.OutputDebugStringA("SubmitSourceBuffer failed\n"); return}
+
+	hresult = p_xaudio2_source_voice.Start(p_xaudio2_source_voice, {}, xa2.COMMIT_NOW)
+	if win.FAILED(hresult) {win.OutputDebugStringA("Start failed\n"); return}
+
 	win32_resize_dib_section(&bitmap_buffer, 1280, 720)
 
 	msg: win.MSG
 
 	x_offset: INT = 0
-	y_offset: INT = 0
 	RUNNING = true
 	for RUNNING {
 		for win.PeekMessageW(&msg, nil, 0, 0, win.PM_REMOVE) {
 			if msg.message == win.WM_QUIT do RUNNING = false
 			win.TranslateMessage(&msg)
 			win.DispatchMessageW(&msg)
+		}
+
+		for idx: DWORD = 0; idx < win.XUSER_MAX_COUNT; idx += 1 {
+			state: win.XINPUT_STATE
+			result := win.XInputGetState(cast(win.XUSER)idx, &state)
+			if cast(DWORD)result == win.ERROR_SUCCESS {
+				win.OutputDebugStringA("Controller found.\n")
+				pad := state.Gamepad
+				up := .DPAD_UP in pad.wButtons
+				down := .DPAD_DOWN in pad.wButtons
+				left := .DPAD_LEFT in pad.wButtons
+				right := .DPAD_RIGHT in pad.wButtons
+				start := .START in pad.wButtons
+				back := .BACK in pad.wButtons
+				lshoulder := .LEFT_SHOULDER in pad.wButtons
+				rshoulder := .RIGHT_SHOULDER in pad.wButtons
+				a_button := .A in pad.wButtons
+				b_button := .B in pad.wButtons
+				x_button := .X in pad.wButtons
+				y_button := .Y in pad.wButtons
+				stick_x := pad.sThumbLX
+				stick_y := pad.sThumbLY
+
+				x_offset += i32(stick_x >> 12)
+				y_offset += i32(stick_y >> 12)
+
+			} else {
+				// TODO(Kevin): Keyboard instead?
+			}
 		}
 
 		render_gradient(&bitmap_buffer, x_offset, y_offset)
@@ -194,9 +360,11 @@ main :: proc() {
 			window_width,
 			window_height,
 		)
-		x_offset += 1
-		y_offset += 1
 	}
 
+	win.VirtualFree(&buffer, 0, win.MEM_RELEASE)
+
+	win.CoUninitialize()
+	xaudio2.Release(xaudio2)
 	os.exit(cast(int)msg.wParam)
 }

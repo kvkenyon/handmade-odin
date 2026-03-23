@@ -1,4 +1,4 @@
-@echo offcd
+@echo off
 
 mkdir ..\..\build
 pushd ..\..\build
