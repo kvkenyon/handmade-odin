@@ -4,6 +4,8 @@ import "base:runtime"
 import "core:math"
 import os "core:os"
 import win "core:sys/windows"
+import "core:thread"
+import "core:time/timezone"
 import xa2 "vendor:windows/XAudio2"
 
 LONG :: win.LONG
@@ -16,23 +18,27 @@ DOUBLE :: f64
 CLASS_NAME :: "HandmadeHeroWindowClass"
 
 // XAudio2
-BITSPERSAMPLE: WORD : 16
-SAMPLESPERSEC: DWORD : 44100
-CYCLESPERSEC: DOUBLE : 220.0
-VOLUME: DOUBLE : 0.5
-AUDIOBUFFERSIZEINCYCLES: WORD : 10
 PI: DOUBLE : 3.14159265358979323846
-
-SAMPLESPERCYCLE: DWORD : SAMPLESPERSEC / cast(DWORD)CYCLESPERSEC
-AUDIOBUFFERSIZEINSAMPLES: DWORD : SAMPLESPERCYCLE * cast(DWORD)AUDIOBUFFERSIZEINCYCLES
-AUDIOBUFFERSIZEINBYTES: DWORD : AUDIOBUFFERSIZEINSAMPLES * cast(DWORD)(BITSPERSAMPLE / 8)
-
 xaudio2: ^xa2.IXAudio2
 sound_buffer: [^]byte
 
+Win32SoundOutput :: struct {
+	SamplesPerSecond: DWORD,
+	ToneHz:           DOUBLE,
+	ToneVolume:       DOUBLE,
+	BytesPerSample:   INT,
+	BitsPerSample:    WORD,
+	SizeInCycles:     INT,
+	Channels:         WORD,
+}
+
+// Input
+HasGamepad := true
+x_offset: INT = 0
+y_offset: INT = 0
+
 // TODO(Kevin): This is a global for now
 RUNNING: bool = false
-y_offset: INT = 0
 
 Win32OffscreenBuffer :: struct {
 	info:            win.BITMAPINFO,
@@ -123,8 +129,9 @@ win32_copy_buffer_to_window :: proc "stdcall" (
 	)
 }
 
-hresult := xa2.Create(&xaudio2, {xa2.FLAGS.DEBUG_ENGINE}, xa2.USE_DEFAULT_PROCESSOR)
-win32_init_xaudio2 :: proc() {
+
+win32_init_xaudio2 :: proc(soundout: Win32SoundOutput) {
+	hresult := xa2.Create(&xaudio2, {xa2.FLAGS.DEBUG_ENGINE}, xa2.USE_DEFAULT_PROCESSOR)
 	if win.FAILED(hresult) {win.OutputDebugStringA("Failed to init XAudio2"); return}
 
 	p_xaudio2_mastering_voice: ^xa2.IXAudio2MasteringVoice
@@ -136,11 +143,11 @@ win32_init_xaudio2 :: proc() {
 
 	wave_format: win.WAVEFORMATEX
 	wave_format.wFormatTag = win.WAVE_FORMAT_PCM
-	wave_format.nChannels = 1
-	wave_format.nSamplesPerSec = SAMPLESPERSEC
-	wave_format.nBlockAlign = wave_format.nChannels * BITSPERSAMPLE / 8
+	wave_format.nChannels = soundout.Channels
+	wave_format.nSamplesPerSec = soundout.SamplesPerSecond
+	wave_format.nBlockAlign = wave_format.nChannels * soundout.BitsPerSample / 8
 	wave_format.nAvgBytesPerSec = wave_format.nSamplesPerSec * DWORD(wave_format.nBlockAlign)
-	wave_format.wBitsPerSample = BITSPERSAMPLE
+	wave_format.wBitsPerSample = soundout.BitsPerSample
 	wave_format.cbSize = 0
 
 	p_xaudio2_source_voice: ^xa2.IXAudio2SourceVoice
@@ -148,25 +155,48 @@ win32_init_xaudio2 :: proc() {
 	hresult = xaudio2.CreateSourceVoice(xaudio2, &p_xaudio2_source_voice, &wave_format)
 	if win.FAILED(hresult) {win.OutputDebugStringA("Failed to init IXAudio2SourceVoice"); return}
 
+	// 44_100 Samples Per Second
+	// 220.0 Hz (full sin cycles per second)
+	// ~200 samples per cycle
+	SamplesPerCycle := INT(f64(soundout.SamplesPerSecond) / soundout.ToneHz)
+	// Pre-compute 10 (SizeInCycles) cycles of Sin.
+	SizeInSamples := soundout.SizeInCycles * SamplesPerCycle * cast(INT)soundout.Channels
+	SizeInBytes := SizeInSamples * soundout.BytesPerSample
+
+
+	// TODO(kevin): Eventually we should factor this buffer soundout
+	// so we can send aribitrary waves to it. Just using the Sin as a test timezone
+	// for now.
 	sound_buffer = cast([^]byte)win.VirtualAlloc(
 		nil,
-		cast(win.SIZE_T)AUDIOBUFFERSIZEINBYTES,
+		cast(win.SIZE_T)SizeInBytes,
 		win.MEM_COMMIT,
 		win.PAGE_READWRITE,
 	)
+
 	phase: DOUBLE = 0.0
 	buffer_index: u32 = 0
-	for buffer_index < AUDIOBUFFERSIZEINBYTES {
-		phase += (2.0 * PI) / cast(DOUBLE)SAMPLESPERCYCLE
-		sample := i16(math.sin(phase) * 32767.0 * VOLUME)
+	for buffer_index < cast(u32)SizeInBytes {
+		phase += (2.0 * PI) / cast(DOUBLE)SamplesPerCycle
+		sample := i16(math.sin(phase) * 32767.0 * soundout.ToneVolume)
+
+		// Channel 1
 		sound_buffer[buffer_index] = byte(sample & 0xFF)
-		sound_buffer[buffer_index + 1] = byte((sample >> 8) & 0xFF)
-		buffer_index += 2
+		buffer_index += 1
+		sound_buffer[buffer_index] = byte((sample >> 8) & 0xFF)
+		buffer_index += 1
+
+		// Channel 2
+		sound_buffer[buffer_index] = byte(sample & 0xFF)
+		buffer_index += 1
+		sound_buffer[buffer_index] = byte((sample >> 8) & 0xFF)
+		buffer_index += 1
+
 	}
 
 	xaudio2_buffer: xa2.BUFFER
 	xaudio2_buffer.Flags = {}
-	xaudio2_buffer.AudioBytes = AUDIOBUFFERSIZEINBYTES
+	xaudio2_buffer.AudioBytes = cast(u32)SizeInBytes
 	xaudio2_buffer.pAudioData = sound_buffer
 	xaudio2_buffer.LoopCount = xa2.LOOP_INFINITE
 
@@ -180,6 +210,43 @@ win32_init_xaudio2 :: proc() {
 	hresult = p_xaudio2_source_voice.Start(p_xaudio2_source_voice, {}, xa2.COMMIT_NOW)
 	if win.FAILED(hresult) {win.OutputDebugStringA("Start failed\n"); return}
 }
+
+win32_handle_gamepad :: proc(x_offset: ^i32, y_offset: ^i32) {
+	for idx: DWORD = 0; idx < win.XUSER_MAX_COUNT; idx += 1 {
+		state: win.XINPUT_STATE
+		result := win.XInputGetState(cast(win.XUSER)idx, &state)
+		if cast(DWORD)result == win.ERROR_SUCCESS {
+			// TODO(kevin): Assuming only 1 gamepad. Otherwise we could have errors with
+			// this flag turning off.
+			HasGamepad = true
+			win.OutputDebugStringA("Controller found.\n")
+			pad := state.Gamepad
+			up := .DPAD_UP in pad.wButtons
+			down := .DPAD_DOWN in pad.wButtons
+			left := .DPAD_LEFT in pad.wButtons
+			right := .DPAD_RIGHT in pad.wButtons
+			start := .START in pad.wButtons
+			back := .BACK in pad.wButtons
+			lshoulder := .LEFT_SHOULDER in pad.wButtons
+			rshoulder := .RIGHT_SHOULDER in pad.wButtons
+			a_button := .A in pad.wButtons
+			b_button := .B in pad.wButtons
+			x_button := .X in pad.wButtons
+			y_button := .Y in pad.wButtons
+			stick_x := pad.sThumbLX
+			stick_y := pad.sThumbLY
+
+			x_offset^ += i32(stick_x >> 12)
+			y_offset^ += i32(stick_y >> 12)
+			break
+		} else {
+			// TODO(Kevin): Keyboard instead?
+			// Flip a flag that makes use use keyboard input instead.
+			HasGamepad = false
+		}
+	}
+}
+
 
 win32_main_window_callback :: proc "stdcall" (
 	window: win.HWND,
@@ -226,42 +293,17 @@ win32_main_window_callback :: proc "stdcall" (
 		case win.VK_F4:
 			if alt_key_down do RUNNING = false
 		case win.VK_SPACE:
-			win.OutputDebugStringA("Spacebar: ")
-			if was_key_down {
-				win.OutputDebugStringA("WasDown ")
-			}
-			if is_key_released {
-				win.OutputDebugStringA("WasReleased")
-			}
-			win.OutputDebugStringA("\n")
 		case win.VK_ESCAPE:
-			win.OutputDebugStringA("Escape: ")
-			if was_key_down {
-				win.OutputDebugStringA("WasDown ")
-			}
-			if is_key_released {
-				win.OutputDebugStringA("WasReleased")
-			}
-			win.OutputDebugStringA("\n")
 		case 'W':
-			win.OutputDebugStringA("W: ")
-			if was_key_down {
-				win.OutputDebugStringA("WasDown ")
-			}
-			if is_key_released {
-				win.OutputDebugStringA("WasReleased")
-			}
-			win.OutputDebugStringA("\n")
+			if !HasGamepad do y_offset -= 1
 		case 'A':
-			win.OutputDebugStringA("A\n")
+			if !HasGamepad do x_offset -= 1
 		case 'S':
-			win.OutputDebugStringA("S\n")
+			if !HasGamepad do y_offset += 1
 		case 'D':
-			win.OutputDebugStringA("D\n")
+			if !HasGamepad do x_offset += 1
 		case 'Q':
-			win.OutputDebugStringA("Q\n")
 		case 'E':
-			win.OutputDebugStringA("E\n")
 		case:
 			break
 		}
@@ -307,12 +349,21 @@ main :: proc() {
 	hr := win.CoInitializeEx(nil, .MULTITHREADED)
 	assert(win.SUCCEEDED(hr), "CoInitializeEx failed")
 
-	win32_init_xaudio2()
+	soundout := Win32SoundOutput {
+		ToneHz           = 220.0,
+		ToneVolume       = 0.5,
+		Channels         = 2,
+		SizeInCycles     = 10,
+		SamplesPerSecond = 44_100,
+		BytesPerSample   = 2,
+		BitsPerSample    = 16,
+	}
+
+	win32_init_xaudio2(soundout)
 	win32_resize_dib_section(&bitmap_buffer, 1280, 720)
 
 	msg: win.MSG
 
-	x_offset: INT = 0
 	RUNNING = true
 	for RUNNING {
 		for win.PeekMessageW(&msg, nil, 0, 0, win.PM_REMOVE) {
@@ -321,34 +372,7 @@ main :: proc() {
 			win.DispatchMessageW(&msg)
 		}
 
-		for idx: DWORD = 0; idx < win.XUSER_MAX_COUNT; idx += 1 {
-			state: win.XINPUT_STATE
-			result := win.XInputGetState(cast(win.XUSER)idx, &state)
-			if cast(DWORD)result == win.ERROR_SUCCESS {
-				win.OutputDebugStringA("Controller found.\n")
-				pad := state.Gamepad
-				up := .DPAD_UP in pad.wButtons
-				down := .DPAD_DOWN in pad.wButtons
-				left := .DPAD_LEFT in pad.wButtons
-				right := .DPAD_RIGHT in pad.wButtons
-				start := .START in pad.wButtons
-				back := .BACK in pad.wButtons
-				lshoulder := .LEFT_SHOULDER in pad.wButtons
-				rshoulder := .RIGHT_SHOULDER in pad.wButtons
-				a_button := .A in pad.wButtons
-				b_button := .B in pad.wButtons
-				x_button := .X in pad.wButtons
-				y_button := .Y in pad.wButtons
-				stick_x := pad.sThumbLX
-				stick_y := pad.sThumbLY
-
-				x_offset += i32(stick_x >> 12)
-				y_offset += i32(stick_y >> 12)
-
-			} else {
-				// TODO(Kevin): Keyboard instead?
-			}
-		}
+		win32_handle_gamepad(&x_offset, &y_offset)
 
 		render_gradient(&bitmap_buffer, x_offset, y_offset)
 
