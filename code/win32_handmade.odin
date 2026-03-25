@@ -1,17 +1,19 @@
 package main
 
+import "base:intrinsics"
 import "base:runtime"
+import "core:fmt"
 import "core:math"
 import os "core:os"
+import "core:strings"
 import win "core:sys/windows"
-import "core:thread"
-import "core:time/timezone"
 import xa2 "vendor:windows/XAudio2"
 
 LONG :: win.LONG
 INT :: win.INT
 WORD :: win.WORD
 DWORD :: win.DWORD
+LARGE_INTEGER :: win.LARGE_INTEGER
 WIN32_UINT32 :: win.UINT32
 DOUBLE :: f64
 
@@ -129,7 +131,6 @@ win32_copy_buffer_to_window :: proc "stdcall" (
 	)
 }
 
-
 win32_init_xaudio2 :: proc(soundout: Win32SoundOutput) {
 	hresult := xa2.Create(&xaudio2, {xa2.FLAGS.DEBUG_ENGINE}, xa2.USE_DEFAULT_PROCESSOR)
 	if win.FAILED(hresult) {win.OutputDebugStringA("Failed to init XAudio2"); return}
@@ -162,7 +163,6 @@ win32_init_xaudio2 :: proc(soundout: Win32SoundOutput) {
 	// Pre-compute 10 (SizeInCycles) cycles of Sin.
 	SizeInSamples := soundout.SizeInCycles * SamplesPerCycle * cast(INT)soundout.Channels
 	SizeInBytes := SizeInSamples * soundout.BytesPerSample
-
 
 	// TODO(kevin): Eventually we should factor this buffer soundout
 	// so we can send aribitrary waves to it. Just using the Sin as a test timezone
@@ -236,8 +236,8 @@ win32_handle_gamepad :: proc(x_offset: ^i32, y_offset: ^i32) {
 			stick_x := pad.sThumbLX
 			stick_y := pad.sThumbLY
 
-			x_offset^ += i32(stick_x >> 12)
-			y_offset^ += i32(stick_y >> 12)
+			x_offset^ += i32(stick_x / 4096)
+			y_offset^ += i32(stick_y / 4096)
 			break
 		} else {
 			// TODO(Kevin): Keyboard instead?
@@ -246,7 +246,6 @@ win32_handle_gamepad :: proc(x_offset: ^i32, y_offset: ^i32) {
 		}
 	}
 }
-
 
 win32_main_window_callback :: proc "stdcall" (
 	window: win.HWND,
@@ -318,6 +317,9 @@ main :: proc() {
 	instance := win.HINSTANCE(win.GetModuleHandleW(nil))
 	assert(instance != nil, "Failed to fetch hInstance.")
 
+	PerfCounterFrequency: LARGE_INTEGER
+	win.QueryPerformanceFrequency(&PerfCounterFrequency)
+
 	lpCmdLine := win.GetCommandLineW()
 
 	cls := win.WNDCLASSW {
@@ -364,8 +366,14 @@ main :: proc() {
 
 	msg: win.MSG
 
+	LastCounter: LARGE_INTEGER
+	win.QueryPerformanceCounter(&LastCounter)
+
+	LastCycleCount: i64 = intrinsics.read_cycle_counter()
+
 	RUNNING = true
 	for RUNNING {
+
 		for win.PeekMessageW(&msg, nil, 0, 0, win.PM_REMOVE) {
 			if msg.message == win.WM_QUIT do RUNNING = false
 			win.TranslateMessage(&msg)
@@ -387,6 +395,34 @@ main :: proc() {
 			window_width,
 			window_height,
 		)
+
+		EndCounter: LARGE_INTEGER
+		win.QueryPerformanceCounter(&EndCounter)
+		EndCycleCount: i64 = intrinsics.read_cycle_counter()
+
+		CounterElapsed := (EndCounter - LastCounter) * 1000
+		CyclesElapsed := EndCycleCount - LastCycleCount
+
+		MSPerFrame := cast(f32)CounterElapsed / cast(f32)PerfCounterFrequency
+		FramesPerSec := 1000.0 / MSPerFrame
+		MegaCycleCount := cast(f32)CyclesElapsed / (1000.0 * 1000.0)
+
+
+		Buff: [256]byte
+		dbg_str := strings.clone_to_cstring(
+			fmt.bprintfln(
+				Buff[:],
+				"%.02f f/s | %.02f ms/f | %.02f mc | %.02f GHz",
+				FramesPerSec,
+				MSPerFrame,
+				MegaCycleCount,
+				(FramesPerSec * MegaCycleCount) / 1000.0,
+			),
+		)
+		win.OutputDebugStringA(dbg_str)
+
+		LastCycleCount = EndCycleCount
+		LastCounter = EndCounter
 	}
 
 	// Release XAudio2 resources
