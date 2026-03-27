@@ -7,6 +7,7 @@ import "core:math"
 import os "core:os"
 import "core:strings"
 import win "core:sys/windows"
+import "game"
 import xa2 "vendor:windows/XAudio2"
 
 LONG :: win.LONG
@@ -24,25 +25,25 @@ PI: DOUBLE : 3.14159265358979323846
 xaudio2: ^xa2.IXAudio2
 sound_buffer: [^]byte
 
-Win32SoundOutput :: struct {
-	SamplesPerSecond: DWORD,
-	ToneHz:           DOUBLE,
-	ToneVolume:       DOUBLE,
-	BytesPerSample:   INT,
-	BitsPerSample:    WORD,
-	SizeInCycles:     INT,
-	Channels:         WORD,
+Win32_Sound_Output :: struct {
+	samples_per_second: DWORD,
+	tone_hz:            DOUBLE,
+	tone_volume:        DOUBLE,
+	bytes_per_sample:   INT,
+	bits_per_sample:    WORD,
+	size_in_cycles:     INT,
+	channels:           WORD,
 }
 
 // Input
-HasGamepad := true
+has_gamepad := true
 x_offset: INT = 0
 y_offset: INT = 0
 
 // TODO(Kevin): This is a global for now
 RUNNING: bool = false
 
-Win32OffscreenBuffer :: struct {
+Win32_Offscreen_Buffer :: struct {
 	info:            win.BITMAPINFO,
 	memory:          rawptr,
 	width:           LONG,
@@ -50,7 +51,7 @@ Win32OffscreenBuffer :: struct {
 	bytes_per_pixel: INT,
 }
 
-bitmap_buffer := Win32OffscreenBuffer{}
+bitmap_buffer := Win32_Offscreen_Buffer{}
 
 win32_get_window_dimensions :: proc "stdcall" (window: win.HWND) -> (width: INT, height: INT) {
 	rect: win.RECT
@@ -60,23 +61,8 @@ win32_get_window_dimensions :: proc "stdcall" (window: win.HWND) -> (width: INT,
 	return
 }
 
-render_gradient :: proc "stdcall" (buffer: ^Win32OffscreenBuffer, x_offset: INT, y_offset: INT) {
-	bitmap_memory32 := cast([^]u32)buffer.memory
-	for y in 0 ..< buffer.height {
-		row_idx := y * buffer.width
-		offset := row_idx + buffer.width
-		row := bitmap_memory32[row_idx:offset]
-		for x in 0 ..< buffer.width {
-			// 0x00RRGGBB
-			blue := cast(u32)(u8(x_offset + x))
-			green := cast(u32)(u8(y_offset + y)) << 8
-			row[x] = blue | green
-		}
-	}
-}
-
 win32_resize_dib_section :: proc "stdcall" (
-	buffer: ^Win32OffscreenBuffer,
+	buffer: ^Win32_Offscreen_Buffer,
 	width: LONG,
 	height: LONG,
 ) {
@@ -108,7 +94,7 @@ win32_resize_dib_section :: proc "stdcall" (
 
 win32_copy_buffer_to_window :: proc "stdcall" (
 	device_context: win.HDC,
-	buffer: ^Win32OffscreenBuffer,
+	buffer: ^Win32_Offscreen_Buffer,
 	x: INT,
 	y: INT,
 	window_width: INT,
@@ -131,7 +117,7 @@ win32_copy_buffer_to_window :: proc "stdcall" (
 	)
 }
 
-win32_init_xaudio2 :: proc(soundout: Win32SoundOutput) {
+win32_init_xaudio2 :: proc(soundout: Win32_Sound_Output) {
 	hresult := xa2.Create(&xaudio2, {xa2.FLAGS.DEBUG_ENGINE}, xa2.USE_DEFAULT_PROCESSOR)
 	if win.FAILED(hresult) {win.OutputDebugStringA("Failed to init XAudio2"); return}
 
@@ -144,11 +130,11 @@ win32_init_xaudio2 :: proc(soundout: Win32SoundOutput) {
 
 	wave_format: win.WAVEFORMATEX
 	wave_format.wFormatTag = win.WAVE_FORMAT_PCM
-	wave_format.nChannels = soundout.Channels
-	wave_format.nSamplesPerSec = soundout.SamplesPerSecond
-	wave_format.nBlockAlign = wave_format.nChannels * soundout.BitsPerSample / 8
+	wave_format.nChannels = soundout.channels
+	wave_format.nSamplesPerSec = soundout.samples_per_second
+	wave_format.nBlockAlign = wave_format.nChannels * soundout.bits_per_sample / 8
 	wave_format.nAvgBytesPerSec = wave_format.nSamplesPerSec * DWORD(wave_format.nBlockAlign)
-	wave_format.wBitsPerSample = soundout.BitsPerSample
+	wave_format.wBitsPerSample = soundout.bits_per_sample
 	wave_format.cbSize = 0
 
 	p_xaudio2_source_voice: ^xa2.IXAudio2SourceVoice
@@ -159,26 +145,26 @@ win32_init_xaudio2 :: proc(soundout: Win32SoundOutput) {
 	// 44_100 Samples Per Second
 	// 220.0 Hz (full sin cycles per second)
 	// ~200 samples per cycle
-	SamplesPerCycle := INT(f64(soundout.SamplesPerSecond) / soundout.ToneHz)
-	// Pre-compute 10 (SizeInCycles) cycles of Sin.
-	SizeInSamples := soundout.SizeInCycles * SamplesPerCycle * cast(INT)soundout.Channels
-	SizeInBytes := SizeInSamples * soundout.BytesPerSample
+	samples_per_cycle := INT(f64(soundout.samples_per_second) / soundout.tone_hz)
+	// Pre-compute 10 (size_in_cycles) cycles of Sin.
+	size_in_samples := soundout.size_in_cycles * samples_per_cycle * cast(INT)soundout.channels
+	size_in_bytes := size_in_samples * soundout.bytes_per_sample
 
 	// TODO(kevin): Eventually we should factor this buffer soundout
 	// so we can send aribitrary waves to it. Just using the Sin as a test timezone
 	// for now.
 	sound_buffer = cast([^]byte)win.VirtualAlloc(
 		nil,
-		cast(win.SIZE_T)SizeInBytes,
+		cast(win.SIZE_T)size_in_bytes,
 		win.MEM_COMMIT,
 		win.PAGE_READWRITE,
 	)
 
 	phase: DOUBLE = 0.0
 	buffer_index: u32 = 0
-	for buffer_index < cast(u32)SizeInBytes {
-		phase += (2.0 * PI) / cast(DOUBLE)SamplesPerCycle
-		sample := i16(math.sin(phase) * 32767.0 * soundout.ToneVolume)
+	for buffer_index < cast(u32)size_in_bytes {
+		phase += (2.0 * PI) / cast(DOUBLE)samples_per_cycle
+		sample := i16(math.sin(phase) * 32767.0 * soundout.tone_volume)
 
 		// Channel 1
 		sound_buffer[buffer_index] = byte(sample & 0xFF)
@@ -196,7 +182,7 @@ win32_init_xaudio2 :: proc(soundout: Win32SoundOutput) {
 
 	xaudio2_buffer: xa2.BUFFER
 	xaudio2_buffer.Flags = {}
-	xaudio2_buffer.AudioBytes = cast(u32)SizeInBytes
+	xaudio2_buffer.AudioBytes = cast(u32)size_in_bytes
 	xaudio2_buffer.pAudioData = sound_buffer
 	xaudio2_buffer.LoopCount = xa2.LOOP_INFINITE
 
@@ -218,7 +204,7 @@ win32_handle_gamepad :: proc(x_offset: ^i32, y_offset: ^i32) {
 		if cast(DWORD)result == win.ERROR_SUCCESS {
 			// TODO(kevin): Assuming only 1 gamepad. Otherwise we could have errors with
 			// this flag turning off.
-			HasGamepad = true
+			has_gamepad = true
 			win.OutputDebugStringA("Controller found.\n")
 			pad := state.Gamepad
 			up := .DPAD_UP in pad.wButtons
@@ -242,7 +228,7 @@ win32_handle_gamepad :: proc(x_offset: ^i32, y_offset: ^i32) {
 		} else {
 			// TODO(Kevin): Keyboard instead?
 			// Flip a flag that makes use use keyboard input instead.
-			HasGamepad = false
+			has_gamepad = false
 		}
 	}
 }
@@ -294,13 +280,13 @@ win32_main_window_callback :: proc "stdcall" (
 		case win.VK_SPACE:
 		case win.VK_ESCAPE:
 		case 'W':
-			if !HasGamepad do y_offset -= 1
+			if !has_gamepad do y_offset -= 1
 		case 'A':
-			if !HasGamepad do x_offset -= 1
+			if !has_gamepad do x_offset -= 1
 		case 'S':
-			if !HasGamepad do y_offset += 1
+			if !has_gamepad do y_offset += 1
 		case 'D':
-			if !HasGamepad do x_offset += 1
+			if !has_gamepad do x_offset += 1
 		case 'Q':
 		case 'E':
 		case:
@@ -317,8 +303,8 @@ main :: proc() {
 	instance := win.HINSTANCE(win.GetModuleHandleW(nil))
 	assert(instance != nil, "Failed to fetch hInstance.")
 
-	PerfCounterFrequency: LARGE_INTEGER
-	win.QueryPerformanceFrequency(&PerfCounterFrequency)
+	perf_counter_frequency: LARGE_INTEGER
+	win.QueryPerformanceFrequency(&perf_counter_frequency)
 
 	lpCmdLine := win.GetCommandLineW()
 
@@ -351,14 +337,14 @@ main :: proc() {
 	hr := win.CoInitializeEx(nil, .MULTITHREADED)
 	assert(win.SUCCEEDED(hr), "CoInitializeEx failed")
 
-	soundout := Win32SoundOutput {
-		ToneHz           = 220.0,
-		ToneVolume       = 0.5,
-		Channels         = 2,
-		SizeInCycles     = 10,
-		SamplesPerSecond = 44_100,
-		BytesPerSample   = 2,
-		BitsPerSample    = 16,
+	soundout := Win32_Sound_Output {
+		tone_hz            = 220.0,
+		tone_volume        = 0.5,
+		channels           = 2,
+		size_in_cycles     = 10,
+		samples_per_second = 44_100,
+		bytes_per_sample   = 2,
+		bits_per_sample    = 16,
 	}
 
 	win32_init_xaudio2(soundout)
@@ -366,10 +352,10 @@ main :: proc() {
 
 	msg: win.MSG
 
-	LastCounter: LARGE_INTEGER
-	win.QueryPerformanceCounter(&LastCounter)
+	last_counter: LARGE_INTEGER
+	win.QueryPerformanceCounter(&last_counter)
 
-	LastCycleCount: i64 = intrinsics.read_cycle_counter()
+	last_cycle_count: i64 = intrinsics.read_cycle_counter()
 
 	RUNNING = true
 	for RUNNING {
@@ -382,7 +368,14 @@ main :: proc() {
 
 		win32_handle_gamepad(&x_offset, &y_offset)
 
-		render_gradient(&bitmap_buffer, x_offset, y_offset)
+		game_offscreen_buffer := game.Game_Offscreen_Buffer {
+			width           = bitmap_buffer.width,
+			height          = bitmap_buffer.height,
+			memory          = bitmap_buffer.memory,
+			bytes_per_pixel = bitmap_buffer.bytes_per_pixel,
+		}
+
+		game.update_and_render(&game_offscreen_buffer, x_offset, y_offset)
 
 		device_context := win.GetDC(window)
 		defer win.ReleaseDC(window, device_context)
@@ -396,16 +389,16 @@ main :: proc() {
 			window_height,
 		)
 
-		EndCounter: LARGE_INTEGER
-		win.QueryPerformanceCounter(&EndCounter)
-		EndCycleCount: i64 = intrinsics.read_cycle_counter()
+		end_counter: LARGE_INTEGER
+		win.QueryPerformanceCounter(&end_counter)
+		end_cycle_count: i64 = intrinsics.read_cycle_counter()
 
-		CounterElapsed := (EndCounter - LastCounter) * 1000
-		CyclesElapsed := EndCycleCount - LastCycleCount
+		counter_elapsed := (end_counter - last_counter) * 1000
+		cycles_elapsed := end_cycle_count - last_cycle_count
 
-		MSPerFrame := cast(f32)CounterElapsed / cast(f32)PerfCounterFrequency
-		FramesPerSec := 1000.0 / MSPerFrame
-		MegaCycleCount := cast(f32)CyclesElapsed / (1000.0 * 1000.0)
+		ms_per_frame := cast(f32)counter_elapsed / cast(f32)perf_counter_frequency
+		frames_per_sec := 1000.0 / ms_per_frame
+		mega_cycle_count := cast(f32)cycles_elapsed / (1000.0 * 1000.0)
 
 
 		Buff: [256]byte
@@ -413,16 +406,16 @@ main :: proc() {
 			fmt.bprintfln(
 				Buff[:],
 				"%.02f f/s | %.02f ms/f | %.02f mc | %.02f GHz",
-				FramesPerSec,
-				MSPerFrame,
-				MegaCycleCount,
-				(FramesPerSec * MegaCycleCount) / 1000.0,
+				frames_per_sec,
+				ms_per_frame,
+				mega_cycle_count,
+				(frames_per_sec * mega_cycle_count) / 1000.0,
 			),
 		)
 		win.OutputDebugStringA(dbg_str)
 
-		LastCycleCount = EndCycleCount
-		LastCounter = EndCounter
+		last_cycle_count = end_cycle_count
+		last_counter = end_counter
 	}
 
 	// Release XAudio2 resources
