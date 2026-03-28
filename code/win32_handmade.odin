@@ -3,7 +3,6 @@ package main
 import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
-import "core:math"
 import os "core:os"
 import "core:strings"
 import win "core:sys/windows"
@@ -21,19 +20,23 @@ DOUBLE :: f64
 CLASS_NAME :: "HandmadeHeroWindowClass"
 
 // XAudio2
-PI: DOUBLE : 3.14159265358979323846
-xaudio2: ^xa2.IXAudio2
-sound_buffer: [^]byte
+
+NUM_BUFFER :: 3
+CHANNELS :: 2
 
 Win32_Sound_Output :: struct {
 	samples_per_second: DWORD,
-	tone_hz:            DOUBLE,
-	tone_volume:        DOUBLE,
 	bytes_per_sample:   INT,
-	bits_per_sample:    WORD,
-	size_in_cycles:     INT,
 	channels:           WORD,
 }
+
+Win32_Audio_Resources :: struct {
+	xaudio2:         ^xa2.IXAudio2,
+	mastering_voice: ^xa2.IXAudio2MasteringVoice,
+	source_voice:    ^xa2.IXAudio2SourceVoice,
+	sound_buffer:    rawptr,
+}
+
 
 // Input
 has_gamepad := true
@@ -117,84 +120,88 @@ win32_copy_buffer_to_window :: proc "stdcall" (
 	)
 }
 
-win32_init_xaudio2 :: proc(soundout: Win32_Sound_Output) {
+win32_clear_sound_buffer :: proc(buffer: [^]u16, buffer_size: int) {
+	for i in 0 ..< buffer_size {
+		buffer[i] = 0
+	}
+}
+
+win32_init_xaudio2 :: proc(soundout: Win32_Sound_Output) -> Win32_Audio_Resources {
+	audio_resources := Win32_Audio_Resources{}
+
+	xaudio2: ^xa2.IXAudio2
 	hresult := xa2.Create(&xaudio2, {xa2.FLAGS.DEBUG_ENGINE}, xa2.USE_DEFAULT_PROCESSOR)
-	if win.FAILED(hresult) {win.OutputDebugStringA("Failed to init XAudio2"); return}
+
+	if win.FAILED(
+		hresult,
+	) {win.OutputDebugStringA("Failed to init XAudio2"); return audio_resources}
 
 	p_xaudio2_mastering_voice: ^xa2.IXAudio2MasteringVoice
 
 	hresult = xaudio2.CreateMasteringVoice(xaudio2, &p_xaudio2_mastering_voice)
+
 	if win.FAILED(
 		hresult,
-	) {win.OutputDebugStringA("Failed to init IXAudio2MasteringVoice"); return}
+	) {win.OutputDebugStringA("Failed to init IXAudio2MasteringVoice"); return audio_resources}
 
 	wave_format: win.WAVEFORMATEX
 	wave_format.wFormatTag = win.WAVE_FORMAT_PCM
 	wave_format.nChannels = soundout.channels
 	wave_format.nSamplesPerSec = soundout.samples_per_second
-	wave_format.nBlockAlign = wave_format.nChannels * soundout.bits_per_sample / 8
+	wave_format.nBlockAlign = wave_format.nChannels * cast(WORD)soundout.bytes_per_sample
 	wave_format.nAvgBytesPerSec = wave_format.nSamplesPerSec * DWORD(wave_format.nBlockAlign)
-	wave_format.wBitsPerSample = soundout.bits_per_sample
+	wave_format.wBitsPerSample = cast(WORD)soundout.bytes_per_sample * 8
 	wave_format.cbSize = 0
 
 	p_xaudio2_source_voice: ^xa2.IXAudio2SourceVoice
 
-	hresult = xaudio2.CreateSourceVoice(xaudio2, &p_xaudio2_source_voice, &wave_format)
-	if win.FAILED(hresult) {win.OutputDebugStringA("Failed to init IXAudio2SourceVoice"); return}
+	hresult = xaudio2.CreateSourceVoice(
+		xaudio2,
+		&p_xaudio2_source_voice,
+		&wave_format,
+		{},
+		xa2.DEFAULT_FREQ_RATIO,
+	)
 
-	// 44_100 Samples Per Second
-	// 220.0 Hz (full sin cycles per second)
-	// ~200 samples per cycle
-	samples_per_cycle := INT(f64(soundout.samples_per_second) / soundout.tone_hz)
-	// Pre-compute 10 (size_in_cycles) cycles of Sin.
-	size_in_samples := soundout.size_in_cycles * samples_per_cycle * cast(INT)soundout.channels
-	size_in_bytes := size_in_samples * soundout.bytes_per_sample
+	if win.FAILED(
+		hresult,
+	) {win.OutputDebugStringA("Failed to init IXAudio2SourceVoice"); return audio_resources}
 
-	// TODO(kevin): Eventually we should factor this buffer soundout
-	// so we can send aribitrary waves to it. Just using the Sin as a test timezone
-	// for now.
-	sound_buffer = cast([^]byte)win.VirtualAlloc(
+	size_in_bytes :=
+		soundout.samples_per_second *
+		cast(DWORD)soundout.bytes_per_sample *
+		cast(DWORD)soundout.channels *
+		NUM_BUFFER
+
+	sound_buffer := cast([^]byte)win.VirtualAlloc(
 		nil,
 		cast(win.SIZE_T)size_in_bytes,
 		win.MEM_COMMIT,
 		win.PAGE_READWRITE,
 	)
 
-	phase: DOUBLE = 0.0
-	buffer_index: u32 = 0
-	for buffer_index < cast(u32)size_in_bytes {
-		phase += (2.0 * PI) / cast(DOUBLE)samples_per_cycle
-		sample := i16(math.sin(phase) * 32767.0 * soundout.tone_volume)
-
-		// Channel 1
-		sound_buffer[buffer_index] = byte(sample & 0xFF)
-		buffer_index += 1
-		sound_buffer[buffer_index] = byte((sample >> 8) & 0xFF)
-		buffer_index += 1
-
-		// Channel 2
-		sound_buffer[buffer_index] = byte(sample & 0xFF)
-		buffer_index += 1
-		sound_buffer[buffer_index] = byte((sample >> 8) & 0xFF)
-		buffer_index += 1
-
-	}
-
-	xaudio2_buffer: xa2.BUFFER
-	xaudio2_buffer.Flags = {}
-	xaudio2_buffer.AudioBytes = cast(u32)size_in_bytes
-	xaudio2_buffer.pAudioData = sound_buffer
-	xaudio2_buffer.LoopCount = xa2.LOOP_INFINITE
-
-	hresult = p_xaudio2_source_voice.SubmitSourceBuffer(
-		p_xaudio2_source_voice,
-		&xaudio2_buffer,
-		nil,
+	win32_clear_sound_buffer(
+		cast([^]u16)sound_buffer,
+		cast(int)soundout.samples_per_second * CHANNELS * NUM_BUFFER,
 	)
-	if win.FAILED(hresult) {win.OutputDebugStringA("SubmitSourceBuffer failed\n"); return}
 
-	hresult = p_xaudio2_source_voice.Start(p_xaudio2_source_voice, {}, xa2.COMMIT_NOW)
-	if win.FAILED(hresult) {win.OutputDebugStringA("Start failed\n"); return}
+	hresult = p_xaudio2_source_voice.Start(p_xaudio2_source_voice, {}, 0)
+	if win.FAILED(hresult) {win.OutputDebugStringA("Start failed\n"); return audio_resources}
+
+	return Win32_Audio_Resources {
+		xaudio2 = xaudio2,
+		mastering_voice = p_xaudio2_mastering_voice,
+		source_voice = p_xaudio2_source_voice,
+		sound_buffer = sound_buffer,
+	}
+}
+
+
+win32_destroy_audio_resources :: proc(audio_resources: ^Win32_Audio_Resources) {
+	audio_resources.source_voice.DestroyVoice(audio_resources.source_voice)
+	audio_resources.mastering_voice.DestroyVoice(audio_resources.mastering_voice)
+	audio_resources.xaudio2.Release(audio_resources.xaudio2)
+	win.VirtualFree(&audio_resources.sound_buffer, 0, win.MEM_RELEASE)
 }
 
 win32_handle_gamepad :: proc(x_offset: ^i32, y_offset: ^i32) {
@@ -338,16 +345,15 @@ main :: proc() {
 	assert(win.SUCCEEDED(hr), "CoInitializeEx failed")
 
 	soundout := Win32_Sound_Output {
-		tone_hz            = 220.0,
-		tone_volume        = 0.5,
-		channels           = 2,
-		size_in_cycles     = 10,
 		samples_per_second = 44_100,
-		bytes_per_sample   = 2,
-		bits_per_sample    = 16,
+		bytes_per_sample   = size_of(i16),
+		channels           = CHANNELS,
 	}
 
-	win32_init_xaudio2(soundout)
+	audio_resources := win32_init_xaudio2(soundout)
+
+	current_sound_buffer := 0
+
 	win32_resize_dib_section(&bitmap_buffer, 1280, 720)
 
 	msg: win.MSG
@@ -367,6 +373,40 @@ main :: proc() {
 		}
 
 		win32_handle_gamepad(&x_offset, &y_offset)
+
+		state: xa2.VOICE_STATE
+		audio_resources.source_voice.GetState(audio_resources.source_voice, &state)
+
+		size_in_bytes :=
+			soundout.samples_per_second *
+			cast(DWORD)soundout.bytes_per_sample *
+			cast(DWORD)soundout.channels
+
+		for state.BuffersQueued < NUM_BUFFER {
+			sub_buffer := cast([^]i16)audio_resources.sound_buffer
+			sub_buffer = sub_buffer[current_sound_buffer *
+			cast(int)soundout.samples_per_second *
+			CHANNELS:]
+
+			game_sound_buffer := game.Game_Sound_Buffer {
+				sample_count       = cast(int)soundout.samples_per_second,
+				samples            = sub_buffer,
+				samples_per_second = cast(int)soundout.samples_per_second,
+			}
+
+			game.game_output_sound(&game_sound_buffer)
+			xaudio2_buffer: xa2.BUFFER
+			xaudio2_buffer.AudioBytes = cast(u32)size_in_bytes
+			xaudio2_buffer.pAudioData = cast([^]u8)sub_buffer
+
+			hresult := audio_resources.source_voice.SubmitSourceBuffer(
+				audio_resources.source_voice,
+				&xaudio2_buffer,
+			)
+			if win.FAILED(hresult) {win.OutputDebugStringA("SubmitSourceBuffer failed\n")}
+			audio_resources.source_voice.GetState(audio_resources.source_voice, &state)
+			current_sound_buffer = (current_sound_buffer + 1) % NUM_BUFFER
+		}
 
 		game_offscreen_buffer := game.Game_Offscreen_Buffer {
 			width           = bitmap_buffer.width,
@@ -416,12 +456,11 @@ main :: proc() {
 
 		last_cycle_count = end_cycle_count
 		last_counter = end_counter
+
 	}
 
-	// Release XAudio2 resources
-	win.VirtualFree(&sound_buffer, 0, win.MEM_RELEASE)
+	win32_destroy_audio_resources(&audio_resources)
 	win.CoUninitialize()
-	xaudio2.Release(xaudio2)
 
 	os.exit(cast(int)msg.wParam)
 }
