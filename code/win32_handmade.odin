@@ -196,7 +196,6 @@ win32_init_xaudio2 :: proc(soundout: Win32_Sound_Output) -> Win32_Audio_Resource
 	}
 }
 
-
 win32_destroy_audio_resources :: proc(audio_resources: ^Win32_Audio_Resources) {
 	audio_resources.source_voice.DestroyVoice(audio_resources.source_voice)
 	audio_resources.mastering_voice.DestroyVoice(audio_resources.mastering_voice)
@@ -204,41 +203,100 @@ win32_destroy_audio_resources :: proc(audio_resources: ^Win32_Audio_Resources) {
 	win.VirtualFree(&audio_resources.sound_buffer, 0, win.MEM_RELEASE)
 }
 
-win32_handle_gamepad :: proc(x_offset: ^i32, y_offset: ^i32) {
+win32_process_xinput_digital_button :: proc(
+	old_button_state: ^game.Game_Button_State,
+	new_button_state: ^game.Game_Button_State,
+	is_down: bool,
+) {
+	new_button_state.half_transition_count = old_button_state.ended_down != is_down ? 1 : 0
+	new_button_state.ended_down = is_down
+}
+
+win32_handle_gamepad :: proc(old_input: ^game.Game_Input, new_input: ^game.Game_Input) {
 	for idx: DWORD = 0; idx < win.XUSER_MAX_COUNT; idx += 1 {
 		state: win.XINPUT_STATE
 		result := win.XInputGetState(cast(win.XUSER)idx, &state)
+		old_controller := &old_input.controllers[idx]
+		new_controller := &new_input.controllers[idx]
 		if cast(DWORD)result == win.ERROR_SUCCESS {
 			// TODO(kevin): Assuming only 1 gamepad. Otherwise we could have errors with
 			// this flag turning off.
 			has_gamepad = true
 			win.OutputDebugStringA("Controller found.\n")
 			pad := state.Gamepad
+
+			new_input.is_analog = true
 			up := .DPAD_UP in pad.wButtons
 			down := .DPAD_DOWN in pad.wButtons
 			left := .DPAD_LEFT in pad.wButtons
 			right := .DPAD_RIGHT in pad.wButtons
 			start := .START in pad.wButtons
 			back := .BACK in pad.wButtons
+
 			lshoulder := .LEFT_SHOULDER in pad.wButtons
+			win32_process_xinput_digital_button(
+				&old_controller.states.left_shoulder,
+				&new_controller.states.left_shoulder,
+				lshoulder,
+			)
 			rshoulder := .RIGHT_SHOULDER in pad.wButtons
+			win32_process_xinput_digital_button(
+				&old_controller.states.right_shoulder,
+				&new_controller.states.right_shoulder,
+				rshoulder,
+			)
 			a_button := .A in pad.wButtons
+			win32_process_xinput_digital_button(
+				&old_controller.states.down,
+				&new_controller.states.down,
+				a_button,
+			)
 			b_button := .B in pad.wButtons
+			win32_process_xinput_digital_button(
+				&old_controller.states.right,
+				&new_controller.states.right,
+				b_button,
+			)
 			x_button := .X in pad.wButtons
+			win32_process_xinput_digital_button(
+				&old_controller.states.left,
+				&new_controller.states.left,
+				x_button,
+			)
 			y_button := .Y in pad.wButtons
+			win32_process_xinput_digital_button(
+				&old_controller.states.up,
+				&new_controller.states.up,
+				y_button,
+			)
+
 			stick_x := pad.sThumbLX
 			stick_y := pad.sThumbLY
 
-			x_offset^ += i32(stick_x / 4096)
-			y_offset^ += i32(stick_y / 4096)
+			max_i16: f32 = 32_767.
+			min_i16: f32 = -32_768.
+
+			x := cast(f32)stick_x
+			y := cast(f32)stick_y
+
+			x = x < 0 ? x / min_i16 : x / max_i16
+			y = y < 0 ? -y / min_i16 : y / max_i16
+
+			new_controller.start_x = old_controller.end_x
+			new_controller.end_x = x
+			new_controller.start_y = old_controller.end_y
+			new_controller.end_y = y
+			new_controller.min_x = x
+			new_controller.min_y = y
+
 			break
 		} else {
-			// TODO(Kevin): Keyboard instead?
-			// Flip a flag that makes use use keyboard input instead.
+			// TODO(kevin): Do we still need this?
 			has_gamepad = false
 		}
 	}
 }
+
 
 win32_main_window_callback :: proc "stdcall" (
 	window: win.HWND,
@@ -341,8 +399,14 @@ main :: proc() {
 
 	assert(window != nil, "Window creation Failed")
 
+	// Graphics
+	win32_resize_dib_section(&bitmap_buffer, 1280, 720)
+
+	// Sound
 	hr := win.CoInitializeEx(nil, .MULTITHREADED)
 	assert(win.SUCCEEDED(hr), "CoInitializeEx failed")
+
+	current_sound_buffer := 0
 
 	soundout := Win32_Sound_Output {
 		samples_per_second = 44_100,
@@ -350,11 +414,13 @@ main :: proc() {
 		channels           = CHANNELS,
 	}
 
+	size_in_bytes :=
+		soundout.samples_per_second *
+		cast(DWORD)soundout.bytes_per_sample *
+		cast(DWORD)soundout.channels
+
 	audio_resources := win32_init_xaudio2(soundout)
 
-	current_sound_buffer := 0
-
-	win32_resize_dib_section(&bitmap_buffer, 1280, 720)
 
 	msg: win.MSG
 
@@ -364,6 +430,8 @@ main :: proc() {
 	last_cycle_count: i64 = intrinsics.read_cycle_counter()
 
 	RUNNING = true
+	new_input := game.Game_Input{}
+	old_input := game.Game_Input{}
 	for RUNNING {
 
 		for win.PeekMessageW(&msg, nil, 0, 0, win.PM_REMOVE) {
@@ -372,15 +440,10 @@ main :: proc() {
 			win.DispatchMessageW(&msg)
 		}
 
-		win32_handle_gamepad(&x_offset, &y_offset)
+		win32_handle_gamepad(&old_input, &new_input)
 
 		state: xa2.VOICE_STATE
 		audio_resources.source_voice.GetState(audio_resources.source_voice, &state)
-
-		size_in_bytes :=
-			soundout.samples_per_second *
-			cast(DWORD)soundout.bytes_per_sample *
-			cast(DWORD)soundout.channels
 
 		for state.BuffersQueued < NUM_BUFFER {
 			sub_buffer := cast([^]i16)audio_resources.sound_buffer
@@ -415,7 +478,7 @@ main :: proc() {
 			bytes_per_pixel = bitmap_buffer.bytes_per_pixel,
 		}
 
-		game.update_and_render(&game_offscreen_buffer, x_offset, y_offset)
+		game.update_and_render(&game_offscreen_buffer, &new_input, &x_offset, &y_offset)
 
 		device_context := win.GetDC(window)
 		defer win.ReleaseDC(window, device_context)
@@ -428,6 +491,10 @@ main :: proc() {
 			window_width,
 			window_height,
 		)
+
+		temp_input := new_input
+		new_input := old_input
+		old_input := temp_input
 
 		end_counter: LARGE_INTEGER
 		win.QueryPerformanceCounter(&end_counter)

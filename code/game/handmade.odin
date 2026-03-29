@@ -17,6 +17,28 @@ Game_Sound_Buffer :: struct {
 	samples_per_second: int,
 }
 
+Game_Button_State :: struct {
+	half_transition_count: int,
+	ended_down:            bool,
+}
+
+Game_Controller_Input :: struct {
+	start_x, end_x, min_x, max_x, start_y, end_y, min_y, max_y: f32,
+	states:                                                     struct {
+		up:             Game_Button_State,
+		down:           Game_Button_State,
+		left:           Game_Button_State,
+		right:          Game_Button_State,
+		left_shoulder:  Game_Button_State,
+		right_shoulder: Game_Button_State,
+	},
+}
+
+Game_Input :: struct {
+	is_analog:   bool,
+	controllers: [4]Game_Controller_Input,
+}
+
 game_output_sound :: proc(sound_buffer: ^Game_Sound_Buffer) {
 	@(static) phase: f32 = 0.0
 	tone_volume: f32 = 0.5
@@ -50,11 +72,22 @@ render_gradient :: proc(buffer: ^Game_Offscreen_Buffer, x_offset: i32, y_offset:
 	}
 }
 
-
 update_and_render :: proc(
 	game_offscreen_buffer: ^Game_Offscreen_Buffer,
-	x_offset: i32,
-	y_offset: i32,
+	game_input: ^Game_Input,
+	x_offset: ^i32,
+	y_offset: ^i32,
 ) {
-	render_gradient(game_offscreen_buffer, x_offset, y_offset)
+	if (game_input.is_analog) {
+		// NOTE(casey): Use analog movement tuning
+		x_offset^ += cast(i32)(4.0 * (game_input.controllers[0].end_x))
+		//tone_hz = 256 + cast(int)(128.0 * (game_input.controllers[0].end_y))
+	} else {
+		// NOTE(casey): Use digital movement tuning
+	}
+	if game_input.controllers[0].states.up.ended_down do y_offset^ -= 1
+	if game_input.controllers[0].states.down.ended_down do y_offset^ += 1
+	if game_input.controllers[0].states.left.ended_down do x_offset^ -= 1
+	if game_input.controllers[0].states.right.ended_down do x_offset^ += 1
+	render_gradient(game_offscreen_buffer, x_offset^, y_offset^)
 }
