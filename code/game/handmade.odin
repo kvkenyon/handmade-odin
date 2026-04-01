@@ -39,6 +39,20 @@ Game_Input :: struct {
 	controllers: [4]Game_Controller_Input,
 }
 
+Game_State :: struct {
+	x_offset: int,
+	y_offset: int,
+	tone_hz:  f32,
+}
+
+Game_Memory :: struct {
+	permanent_storage_size: u64,
+	permanent_storage:      rawptr,
+	transient_storage_size: u64,
+	transient_storage:      rawptr,
+	is_initialized:         bool,
+}
+
 game_output_sound :: proc(sound_buffer: ^Game_Sound_Buffer) {
 	@(static) phase: f32 = 0.0
 	tone_volume: f32 = 0.5
@@ -58,36 +72,45 @@ game_output_sound :: proc(sound_buffer: ^Game_Sound_Buffer) {
 	}
 }
 
-render_gradient :: proc(buffer: ^Game_Offscreen_Buffer, x_offset: i32, y_offset: i32) {
+render_gradient :: proc(buffer: ^Game_Offscreen_Buffer, game_state: ^Game_State) {
 	bitmap_memory32 := cast([^]u32)buffer.memory
 	for y in 0 ..< buffer.height {
 		row_idx := y * buffer.width
 		offset := row_idx + buffer.width
 		row := bitmap_memory32[row_idx:offset]
 		for x in 0 ..< buffer.width {
-			blue := cast(u32)(u8(x_offset + x))
-			green := cast(u32)(u8(y_offset + y)) << 8
+			blue := cast(u32)(u8(cast(i32)game_state.x_offset + x))
+			green := cast(u32)(u8(cast(i32)game_state.y_offset + y)) << 8
 			row[x] = blue | green
 		}
 	}
 }
 
 update_and_render :: proc(
+	game_memory: ^Game_Memory,
 	game_offscreen_buffer: ^Game_Offscreen_Buffer,
 	game_input: ^Game_Input,
-	x_offset: ^i32,
-	y_offset: ^i32,
 ) {
-	if (game_input.is_analog) {
-		// NOTE(casey): Use analog movement tuning
-		x_offset^ += cast(i32)(4.0 * (game_input.controllers[0].end_x))
-		//tone_hz = 256 + cast(int)(128.0 * (game_input.controllers[0].end_y))
-	} else {
-		// NOTE(casey): Use digital movement tuning
+	assert(size_of(Game_State) <= game_memory.permanent_storage_size)
+	game_state := cast(^Game_State)game_memory.permanent_storage
+
+	if !game_memory.is_initialized {
+		game_state.tone_hz = 220.0
+		game_memory.is_initialized = true
 	}
-	if game_input.controllers[0].states.up.ended_down do y_offset^ -= 1
-	if game_input.controllers[0].states.down.ended_down do y_offset^ += 1
-	if game_input.controllers[0].states.left.ended_down do x_offset^ -= 1
-	if game_input.controllers[0].states.right.ended_down do x_offset^ += 1
-	render_gradient(game_offscreen_buffer, x_offset^, y_offset^)
+
+	if (game_input.is_analog) {
+		// NOTE(kevin): Use analog movement tuning
+		game_state.x_offset += cast(int)(4.0 * (game_input.controllers[0].end_x))
+		game_state.tone_hz = 256.0 + (128.0 * (game_input.controllers[0].end_y))
+	} else {
+		// NOTE(kevin): Use digital movement tuning
+	}
+
+	if game_input.controllers[0].states.up.ended_down do game_state.y_offset -= 1
+	if game_input.controllers[0].states.down.ended_down do game_state.y_offset += 1
+	if game_input.controllers[0].states.left.ended_down do game_state.x_offset -= 1
+	if game_input.controllers[0].states.right.ended_down do game_state.x_offset += 1
+
+	render_gradient(game_offscreen_buffer, game_state)
 }

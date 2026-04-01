@@ -3,11 +3,14 @@ package main
 import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
+import "core:mem"
 import os "core:os"
 import "core:strings"
 import win "core:sys/windows"
 import "game"
 import xa2 "vendor:windows/XAudio2"
+
+HANDMADE_INTERNAL :: #config(HANDMADE_INTERNAL, false)
 
 LONG :: win.LONG
 INT :: win.INT
@@ -18,6 +21,14 @@ WIN32_UINT32 :: win.UINT32
 DOUBLE :: f64
 
 CLASS_NAME :: "HandmadeHeroWindowClass"
+
+// TODO(Kevin): This is a global for now
+RUNNING: bool = false
+
+Kilobytes :: #force_inline proc(value: u64) -> u64 {return value * 1024}
+Megabytes :: #force_inline proc(value: u64) -> u64 {return Kilobytes(value) * 1024}
+Gigabytes :: #force_inline proc(value: u64) -> u64 {return Megabytes(value) * 1024}
+Terabytes :: #force_inline proc(value: u64) -> u64 {return Gigabytes(value) * 1024}
 
 // XAudio2
 
@@ -37,14 +48,6 @@ Win32_Audio_Resources :: struct {
 	sound_buffer:    rawptr,
 }
 
-
-// Input
-has_gamepad := true
-x_offset: INT = 0
-y_offset: INT = 0
-
-// TODO(Kevin): This is a global for now
-RUNNING: bool = false
 
 Win32_Offscreen_Buffer :: struct {
 	info:            win.BITMAPINFO,
@@ -221,7 +224,6 @@ win32_handle_gamepad :: proc(old_input: ^game.Game_Input, new_input: ^game.Game_
 		if cast(DWORD)result == win.ERROR_SUCCESS {
 			// TODO(kevin): Assuming only 1 gamepad. Otherwise we could have errors with
 			// this flag turning off.
-			has_gamepad = true
 			win.OutputDebugStringA("Controller found.\n")
 			pad := state.Gamepad
 
@@ -291,8 +293,6 @@ win32_handle_gamepad :: proc(old_input: ^game.Game_Input, new_input: ^game.Game_
 
 			break
 		} else {
-			// TODO(kevin): Do we still need this?
-			has_gamepad = false
 		}
 	}
 }
@@ -345,13 +345,9 @@ win32_main_window_callback :: proc "stdcall" (
 		case win.VK_SPACE:
 		case win.VK_ESCAPE:
 		case 'W':
-			if !has_gamepad do y_offset -= 1
 		case 'A':
-			if !has_gamepad do x_offset -= 1
 		case 'S':
-			if !has_gamepad do y_offset += 1
 		case 'D':
-			if !has_gamepad do x_offset += 1
 		case 'Q':
 		case 'E':
 		case:
@@ -371,7 +367,7 @@ main :: proc() {
 	perf_counter_frequency: LARGE_INTEGER
 	win.QueryPerformanceFrequency(&perf_counter_frequency)
 
-	lpCmdLine := win.GetCommandLineW()
+	lp_cmd_line := win.GetCommandLineW()
 
 	cls := win.WNDCLASSW {
 		style         = win.CS_OWNDC | win.CS_HREDRAW | win.CS_VREDRAW,
@@ -399,6 +395,43 @@ main :: proc() {
 
 	assert(window != nil, "Window creation Failed")
 
+	// Memory
+	base_address: win.LPVOID = nil
+	when HANDMADE_INTERNAL {
+		base_address = cast(rawptr)cast(uintptr)Terabytes(2)
+	}
+
+	permanent_storage_size := Megabytes(64)
+	transient_storage_size := Gigabytes(4)
+	total_size := permanent_storage_size + transient_storage_size
+
+
+	base := cast(uintptr)win.VirtualAlloc(
+		base_address,
+		cast(win.SIZE_T)total_size,
+		win.MEM_COMMIT | win.MEM_RESERVE,
+		win.PAGE_READWRITE,
+	)
+
+	permanent_storage := cast(rawptr)base
+	transient_storage := cast(rawptr)(base + cast(uintptr)permanent_storage_size)
+
+	assert(permanent_storage != nil, "Permanent storage failed to allocate.")
+	assert(transient_storage != nil, "Transient storage failed to allocate.")
+
+	// NOTE(kevin): We can remove this, using it to confirm that we get the memory
+	// Windows doesn't seem to give you the memory until you write to the buffer.
+	mem.set(permanent_storage, 0, cast(int)permanent_storage_size)
+	mem.set(transient_storage, 0, cast(int)transient_storage_size)
+
+	memory := game.Game_Memory {
+		permanent_storage_size = permanent_storage_size,
+		permanent_storage      = permanent_storage,
+		transient_storage_size = transient_storage_size,
+		transient_storage      = transient_storage,
+		is_initialized         = false,
+	}
+
 	// Graphics
 	win32_resize_dib_section(&bitmap_buffer, 1280, 720)
 
@@ -421,7 +454,6 @@ main :: proc() {
 
 	audio_resources := win32_init_xaudio2(soundout)
 
-
 	msg: win.MSG
 
 	last_counter: LARGE_INTEGER
@@ -433,7 +465,6 @@ main :: proc() {
 	new_input := game.Game_Input{}
 	old_input := game.Game_Input{}
 	for RUNNING {
-
 		for win.PeekMessageW(&msg, nil, 0, 0, win.PM_REMOVE) {
 			if msg.message == win.WM_QUIT do RUNNING = false
 			win.TranslateMessage(&msg)
@@ -478,7 +509,7 @@ main :: proc() {
 			bytes_per_pixel = bitmap_buffer.bytes_per_pixel,
 		}
 
-		game.update_and_render(&game_offscreen_buffer, &new_input, &x_offset, &y_offset)
+		game.update_and_render(&memory, &game_offscreen_buffer, &new_input)
 
 		device_context := win.GetDC(window)
 		defer win.ReleaseDC(window, device_context)
