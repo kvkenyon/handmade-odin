@@ -1,4 +1,5 @@
-package main
+#+build windows
+package game
 
 import "base:intrinsics"
 import "base:runtime"
@@ -7,7 +8,6 @@ import "core:mem"
 import os "core:os"
 import "core:strings"
 import win "core:sys/windows"
-import "game"
 import xa2 "vendor:windows/XAudio2"
 
 HANDMADE_INTERNAL :: #config(HANDMADE_INTERNAL, false)
@@ -30,6 +30,75 @@ Megabytes :: #force_inline proc(value: u64) -> u64 {return Kilobytes(value) * 10
 Gigabytes :: #force_inline proc(value: u64) -> u64 {return Megabytes(value) * 1024}
 Terabytes :: #force_inline proc(value: u64) -> u64 {return Gigabytes(value) * 1024}
 
+// File I/O
+
+debug_platform_read_entire_file :: proc(filename: cstring16) -> Debug_Read_Result {
+	result := Debug_Read_Result{}
+	handle := win.CreateFileW(
+		filename,
+		win.GENERIC_READ,
+		win.FILE_SHARE_READ,
+		nil,
+		win.OPEN_EXISTING,
+		0,
+		nil,
+	)
+
+	if handle != win.INVALID_HANDLE {
+		file_size: win.LARGE_INTEGER
+		if (win.GetFileSizeEx(handle, &file_size)) {
+			result.contents = win.VirtualAlloc(
+				nil,
+				cast(uint)file_size,
+				win.MEM_RESERVE | win.MEM_COMMIT,
+				win.PAGE_READWRITE,
+			)
+			if result.contents != nil {
+				read_bytes: DWORD
+				if (win.ReadFile(handle, result.contents, cast(u32)file_size, &read_bytes, nil) &&
+					   read_bytes == cast(u32)file_size) {
+					result.contents_size = cast(u32)file_size
+				} else {
+					// TODO(kevin): logging
+				}
+
+			} else {
+				// TODO(kevin): logging
+			}
+
+		} else {
+			// TODO(kevin): logging
+		}
+		win.CloseHandle(handle)
+	} else {
+		// TODO(Kevin): logging
+	}
+
+	return result
+}
+debug_platform_write_entire_file :: proc(
+	filename: cstring16,
+	memory_size: DWORD,
+	memory: rawptr,
+) -> bool {
+	result := false
+	handle := win.CreateFileW(filename, win.GENERIC_WRITE, 0, nil, win.CREATE_ALWAYS, 0, nil)
+
+	if handle != win.INVALID_HANDLE {
+		bytes_written: DWORD
+		if win.WriteFile(handle, memory, memory_size, &bytes_written, nil) {
+			result = bytes_written == memory_size
+		} else {
+			// TODO(kevin): logging
+		}
+		win.CloseHandle(handle)
+	} else {
+		// TODO(kevin): logging
+	}
+
+	return result
+}
+
 // XAudio2
 
 NUM_BUFFER :: 3
@@ -48,6 +117,7 @@ Win32_Audio_Resources :: struct {
 	sound_buffer:    rawptr,
 }
 
+// Video
 
 Win32_Offscreen_Buffer :: struct {
 	info:            win.BITMAPINFO,
@@ -207,15 +277,15 @@ win32_destroy_audio_resources :: proc(audio_resources: ^Win32_Audio_Resources) {
 }
 
 win32_process_xinput_digital_button :: proc(
-	old_button_state: ^game.Game_Button_State,
-	new_button_state: ^game.Game_Button_State,
+	old_button_state: ^Game_Button_State,
+	new_button_state: ^Game_Button_State,
 	is_down: bool,
 ) {
 	new_button_state.half_transition_count = old_button_state.ended_down != is_down ? 1 : 0
 	new_button_state.ended_down = is_down
 }
 
-win32_handle_gamepad :: proc(old_input: ^game.Game_Input, new_input: ^game.Game_Input) {
+win32_handle_gamepad :: proc(old_input: ^Game_Input, new_input: ^Game_Input) {
 	for idx: DWORD = 0; idx < win.XUSER_MAX_COUNT; idx += 1 {
 		state: win.XINPUT_STATE
 		result := win.XInputGetState(cast(win.XUSER)idx, &state)
@@ -395,7 +465,6 @@ main :: proc() {
 
 	assert(window != nil, "Window creation Failed")
 
-	// Memory
 	base_address: win.LPVOID = nil
 	when HANDMADE_INTERNAL {
 		base_address = cast(rawptr)cast(uintptr)Terabytes(2)
@@ -424,7 +493,7 @@ main :: proc() {
 	mem.set(permanent_storage, 0, cast(int)permanent_storage_size)
 	mem.set(transient_storage, 0, cast(int)transient_storage_size)
 
-	memory := game.Game_Memory {
+	memory := Game_Memory {
 		permanent_storage_size = permanent_storage_size,
 		permanent_storage      = permanent_storage,
 		transient_storage_size = transient_storage_size,
@@ -462,8 +531,8 @@ main :: proc() {
 	last_cycle_count: i64 = intrinsics.read_cycle_counter()
 
 	RUNNING = true
-	new_input := game.Game_Input{}
-	old_input := game.Game_Input{}
+	new_input := Game_Input{}
+	old_input := Game_Input{}
 	for RUNNING {
 		for win.PeekMessageW(&msg, nil, 0, 0, win.PM_REMOVE) {
 			if msg.message == win.WM_QUIT do RUNNING = false
@@ -482,13 +551,13 @@ main :: proc() {
 			cast(int)soundout.samples_per_second *
 			CHANNELS:]
 
-			game_sound_buffer := game.Game_Sound_Buffer {
+			game_sound_buffer := Game_Sound_Buffer {
 				sample_count       = cast(int)soundout.samples_per_second,
 				samples            = sub_buffer,
 				samples_per_second = cast(int)soundout.samples_per_second,
 			}
 
-			game.game_output_sound(&game_sound_buffer)
+			game_output_sound(&game_sound_buffer)
 			xaudio2_buffer: xa2.BUFFER
 			xaudio2_buffer.AudioBytes = cast(u32)size_in_bytes
 			xaudio2_buffer.pAudioData = cast([^]u8)sub_buffer
@@ -502,14 +571,14 @@ main :: proc() {
 			current_sound_buffer = (current_sound_buffer + 1) % NUM_BUFFER
 		}
 
-		game_offscreen_buffer := game.Game_Offscreen_Buffer {
+		game_offscreen_buffer := Game_Offscreen_Buffer {
 			width           = bitmap_buffer.width,
 			height          = bitmap_buffer.height,
 			memory          = bitmap_buffer.memory,
 			bytes_per_pixel = bitmap_buffer.bytes_per_pixel,
 		}
 
-		game.update_and_render(&memory, &game_offscreen_buffer, &new_input)
+		update_and_render(&memory, &game_offscreen_buffer, &new_input)
 
 		device_context := win.GetDC(window)
 		defer win.ReleaseDC(window, device_context)

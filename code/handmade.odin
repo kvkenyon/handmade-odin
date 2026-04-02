@@ -97,6 +97,15 @@ update_and_render :: proc(
 	if !game_memory.is_initialized {
 		game_state.tone_hz = 220.0
 		game_memory.is_initialized = true
+
+		filename: cstring16 = "win32_handmade.odin"
+
+		debug_read_result := debug_platform_read_entire_file(filename)
+		debug_platform_write_entire_file(
+			"test.txt",
+			debug_read_result.contents_size,
+			debug_read_result.contents,
+		)
 	}
 
 	if (game_input.is_analog) {
