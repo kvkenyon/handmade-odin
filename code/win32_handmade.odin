@@ -30,34 +30,45 @@ Megabytes :: #force_inline proc(value: u64) -> u64 {return Kilobytes(value) * 10
 Gigabytes :: #force_inline proc(value: u64) -> u64 {return Megabytes(value) * 1024}
 Terabytes :: #force_inline proc(value: u64) -> u64 {return Gigabytes(value) * 1024}
 
-// File I/O
+// DEBUG File I/O
 
-debug_platform_read_entire_file :: proc(filename: cstring16) -> Debug_Read_Result {
-	result := Debug_Read_Result{}
-	handle := win.CreateFileW(
-		filename,
-		win.GENERIC_READ,
-		win.FILE_SHARE_READ,
-		nil,
-		win.OPEN_EXISTING,
-		0,
-		nil,
-	)
+when HANDMADE_INTERNAL {
+	debug_platform_read_entire_file :: proc(filename: cstring16) -> Debug_Read_Result {
+		result := Debug_Read_Result{}
+		handle := win.CreateFileW(
+			filename,
+			win.GENERIC_READ,
+			win.FILE_SHARE_READ,
+			nil,
+			win.OPEN_EXISTING,
+			0,
+			nil,
+		)
 
-	if handle != win.INVALID_HANDLE {
-		file_size: win.LARGE_INTEGER
-		if (win.GetFileSizeEx(handle, &file_size)) {
-			result.contents = win.VirtualAlloc(
-				nil,
-				cast(uint)file_size,
-				win.MEM_RESERVE | win.MEM_COMMIT,
-				win.PAGE_READWRITE,
-			)
-			if result.contents != nil {
-				read_bytes: DWORD
-				if (win.ReadFile(handle, result.contents, cast(u32)file_size, &read_bytes, nil) &&
-					   read_bytes == cast(u32)file_size) {
-					result.contents_size = cast(u32)file_size
+		if handle != win.INVALID_HANDLE {
+			file_size: win.LARGE_INTEGER
+			if (win.GetFileSizeEx(handle, &file_size)) {
+				result.contents = win.VirtualAlloc(
+					nil,
+					cast(uint)file_size,
+					win.MEM_RESERVE | win.MEM_COMMIT,
+					win.PAGE_READWRITE,
+				)
+				if result.contents != nil {
+					read_bytes: DWORD
+					if (win.ReadFile(
+							   handle,
+							   result.contents,
+							   cast(u32)file_size,
+							   &read_bytes,
+							   nil,
+						   ) &&
+						   read_bytes == cast(u32)file_size) {
+						result.contents_size = cast(u32)file_size
+					} else {
+						// TODO(kevin): logging
+					}
+
 				} else {
 					// TODO(kevin): logging
 				}
@@ -65,38 +76,42 @@ debug_platform_read_entire_file :: proc(filename: cstring16) -> Debug_Read_Resul
 			} else {
 				// TODO(kevin): logging
 			}
+			win.CloseHandle(handle)
+		} else {
+			// TODO(Kevin): logging
+		}
 
+		return result
+	}
+
+	debug_platform_write_entire_file :: proc(
+		filename: cstring16,
+		memory_size: DWORD,
+		memory: rawptr,
+	) -> bool {
+		result := false
+		handle := win.CreateFileW(filename, win.GENERIC_WRITE, 0, nil, win.CREATE_ALWAYS, 0, nil)
+
+		if handle != win.INVALID_HANDLE {
+			bytes_written: DWORD
+			if win.WriteFile(handle, memory, memory_size, &bytes_written, nil) {
+				result = bytes_written == memory_size
+			} else {
+				// TODO(kevin): logging
+			}
+			win.CloseHandle(handle)
 		} else {
 			// TODO(kevin): logging
 		}
-		win.CloseHandle(handle)
-	} else {
-		// TODO(Kevin): logging
+
+		return result
 	}
 
-	return result
-}
-debug_platform_write_entire_file :: proc(
-	filename: cstring16,
-	memory_size: DWORD,
-	memory: rawptr,
-) -> bool {
-	result := false
-	handle := win.CreateFileW(filename, win.GENERIC_WRITE, 0, nil, win.CREATE_ALWAYS, 0, nil)
-
-	if handle != win.INVALID_HANDLE {
-		bytes_written: DWORD
-		if win.WriteFile(handle, memory, memory_size, &bytes_written, nil) {
-			result = bytes_written == memory_size
-		} else {
-			// TODO(kevin): logging
+	debug_platform_free_file_memory :: proc(memory: rawptr) {
+		if memory != nil {
+			win.VirtualFree(memory, 0, win.MEM_RELEASE)
 		}
-		win.CloseHandle(handle)
-	} else {
-		// TODO(kevin): logging
 	}
-
-	return result
 }
 
 // XAudio2
@@ -285,6 +300,15 @@ win32_process_xinput_digital_button :: proc(
 	new_button_state.ended_down = is_down
 }
 
+win32_process_keyboard_message :: proc(
+	button_state: ^Game_Button_State,
+	was_down: bool,
+	is_down: bool,
+) {
+	button_state.half_transition_count = was_down != is_down ? 1 : 0
+	button_state.ended_down = is_down
+}
+
 win32_handle_gamepad :: proc(old_input: ^Game_Input, new_input: ^Game_Input) {
 	for idx: DWORD = 0; idx < win.XUSER_MAX_COUNT; idx += 1 {
 		state: win.XINPUT_STATE
@@ -392,37 +416,6 @@ win32_main_window_callback :: proc "stdcall" (
 		win.EndPaint(window, &p)
 	case win.WM_ACTIVATEAPP:
 		win.OutputDebugStringA("WM_ACTIVATEAPP\n")
-	case win.WM_SYSKEYUP:
-		fallthrough
-	case win.WM_SYSKEYDOWN:
-		fallthrough
-	case win.WM_KEYUP:
-		fallthrough
-	case win.WM_KEYDOWN:
-		vk_code := win.LOWORD(wparam)
-		key_flags := win.HIWORD(lparam)
-		was_key_down := (key_flags & win.KF_REPEAT) == win.KF_REPEAT
-		is_key_released := (key_flags & win.KF_UP) == win.KF_UP
-		alt_key_down := (key_flags & win.KF_ALTDOWN) == win.KF_ALTDOWN
-		repeat_count := win.LOWORD(lparam)
-		switch (vk_code) {
-		case win.VK_LEFT:
-		case win.VK_RIGHT:
-		case win.VK_UP:
-		case win.VK_DOWN:
-		case win.VK_F4:
-			if alt_key_down do RUNNING = false
-		case win.VK_SPACE:
-		case win.VK_ESCAPE:
-		case 'W':
-		case 'A':
-		case 'S':
-		case 'D':
-		case 'Q':
-		case 'E':
-		case:
-			break
-		}
 	case:
 		result = win.DefWindowProcW(window, msg, wparam, lparam)
 	}
@@ -536,8 +529,100 @@ main :: proc() {
 	for RUNNING {
 		for win.PeekMessageW(&msg, nil, 0, 0, win.PM_REMOVE) {
 			if msg.message == win.WM_QUIT do RUNNING = false
-			win.TranslateMessage(&msg)
-			win.DispatchMessageW(&msg)
+			switch msg.message {
+			case win.WM_SYSKEYUP:
+				fallthrough
+			case win.WM_SYSKEYDOWN:
+				fallthrough
+			case win.WM_KEYUP:
+				fallthrough
+			case win.WM_KEYDOWN:
+				vk_code := win.LOWORD(msg.wParam)
+				key_flags := win.HIWORD(msg.lParam)
+				was_key_down := (key_flags & win.KF_REPEAT) == win.KF_REPEAT
+				is_key_released := (key_flags & win.KF_UP) == win.KF_UP
+				alt_key_down := (key_flags & win.KF_ALTDOWN) == win.KF_ALTDOWN
+				repeat_count := win.LOWORD(msg.lParam)
+				zero_ctrl := Game_Controller_Input{}
+				new_input.controllers[0] = zero_ctrl
+				new_controller := &new_input.controllers[0]
+				switch (vk_code) {
+				case win.VK_LEFT:
+					win32_process_keyboard_message(
+						&new_controller.states.left,
+						was_key_down,
+						!is_key_released,
+					)
+					win.OutputDebugStringA("LEFT\n")
+				case win.VK_RIGHT:
+					win32_process_keyboard_message(
+						&new_controller.states.right,
+						was_key_down,
+						!is_key_released,
+					)
+					win.OutputDebugStringA("RIGHT\n")
+				case win.VK_UP:
+					win32_process_keyboard_message(
+						&new_controller.states.up,
+						was_key_down,
+						!is_key_released,
+					)
+					win.OutputDebugStringA("UP\n")
+				case win.VK_DOWN:
+					win32_process_keyboard_message(
+						&new_controller.states.down,
+						was_key_down,
+						!is_key_released,
+					)
+					win.OutputDebugStringA("DOWN\n")
+				case win.VK_F4:
+					if alt_key_down do RUNNING = false
+				case win.VK_SPACE:
+				case win.VK_ESCAPE:
+				case 'W':
+					win32_process_keyboard_message(
+						&new_controller.states.up,
+						was_key_down,
+						!is_key_released,
+					)
+				case 'A':
+					win32_process_keyboard_message(
+						&new_controller.states.left,
+						was_key_down,
+						!is_key_released,
+					)
+				case 'S':
+					win32_process_keyboard_message(
+						&new_controller.states.down,
+						was_key_down,
+						!is_key_released,
+					)
+				case 'D':
+					win32_process_keyboard_message(
+						&new_controller.states.right,
+						was_key_down,
+						!is_key_released,
+					)
+				case 'Q':
+					win32_process_keyboard_message(
+						&new_controller.states.left_shoulder,
+						was_key_down,
+						!is_key_released,
+					)
+				case 'E':
+					win32_process_keyboard_message(
+						&new_controller.states.right_shoulder,
+						was_key_down,
+						!is_key_released,
+					)
+				case:
+					break
+
+				}
+			case:
+				win.TranslateMessage(&msg)
+				win.DispatchMessageW(&msg)
+			}
 		}
 
 		win32_handle_gamepad(&old_input, &new_input)
