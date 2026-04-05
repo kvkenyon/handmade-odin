@@ -9,6 +9,14 @@ import "core:strings"
 import win "core:sys/windows"
 import xa2 "vendor:windows/XAudio2"
 
+foreign import avrt "system:Avrt.lib"
+
+@(default_calling_convention = "stdcall")
+foreign avrt {
+	AvSetMmThreadCharacteristicsW :: proc(TaskName: win.LPCWSTR, TaskIndex: win.LPDWORD) -> win.HANDLE ---
+	AvRevertMmThreadCharacteristics :: proc(AvrtHandle: win.HANDLE) -> win.BOOL ---
+}
+
 HANDMADE_INTERNAL :: #config(HANDMADE_INTERNAL, false)
 
 LONG :: win.LONG
@@ -24,6 +32,7 @@ CLASS_NAME :: "HandmadeHeroWindowClass"
 
 // TODO(Kevin): This is a global for now
 RUNNING: bool = false
+perf_counter_frequency: LARGE_INTEGER
 
 Kilobytes :: #force_inline proc(value: u64) -> u64 {return value * 1024}
 Megabytes :: #force_inline proc(value: u64) -> u64 {return Kilobytes(value) * 1024}
@@ -506,11 +515,26 @@ win32_main_window_callback :: proc "stdcall" (
 	return result
 }
 
+win32_get_wall_clock :: proc() -> LARGE_INTEGER {
+	result: LARGE_INTEGER
+	win.QueryPerformanceCounter(&result)
+	return result
+}
+
+win32_get_seconds_elapsed :: proc(start: LARGE_INTEGER, end: LARGE_INTEGER) -> f32 {
+	diff := cast(f32)(end - start)
+	return diff / cast(f32)perf_counter_frequency
+}
+
 main :: proc() {
 	instance := win.HINSTANCE(win.GetModuleHandleW(nil))
 	assert(instance != nil, "Failed to fetch hInstance.")
 
-	perf_counter_frequency: LARGE_INTEGER
+	task_idx: u32 = 0
+	mmrt_handle := AvSetMmThreadCharacteristicsW("Games", &task_idx)
+
+	sleep_is_granular := win.timeBeginPeriod(1) == win.TIMERR_NOERROR
+
 	win.QueryPerformanceFrequency(&perf_counter_frequency)
 
 	lp_cmd_line := win.GetCommandLineW()
@@ -596,14 +620,21 @@ main :: proc() {
 
 	msg: win.MSG
 
-	last_counter: LARGE_INTEGER
-	win.QueryPerformanceCounter(&last_counter)
 
 	last_cycle_count: i64 = intrinsics.read_cycle_counter()
+
+	dm: win.DEVMODEW
+	dm.dmSize = size_of(win.DEVMODEW)
+	win.EnumDisplaySettingsW(nil, win.ENUM_CURRENT_SETTINGS, &dm)
+	monitor_refresh_hz := dm.dmDisplayFrequency
+	game_update_hz := monitor_refresh_hz / 2
+	target_seconds_per_frame := 1.0 / cast(f32)game_update_hz
 
 	RUNNING = true
 	new_input := Game_Input{}
 	old_input := Game_Input{}
+
+	last_counter := win32_get_wall_clock()
 	for RUNNING {
 		old_keyboard_controller := old_input.controllers[0]
 		new_input.controllers[0] = Game_Controller_Input{}
@@ -618,6 +649,8 @@ main :: proc() {
 		state: xa2.VOICE_STATE
 		audio_resources.source_voice.GetState(audio_resources.source_voice, &state)
 
+		// TODO(kevin): The audio timing is severly off. We are submitting buffers
+		// too far into the future for the current frame. We need synchronization.
 		game_sound_buffer: Game_Sound_Buffer
 		if state.BuffersQueued < NUM_BUFFER {
 			sub_buffer := cast([^]i16)audio_resources.sound_buffer
@@ -669,18 +702,27 @@ main :: proc() {
 		new_input = old_input
 		old_input = temp_input
 
-		end_counter: LARGE_INTEGER
-		win.QueryPerformanceCounter(&end_counter)
 		end_cycle_count: i64 = intrinsics.read_cycle_counter()
-
-		counter_elapsed := (end_counter - last_counter) * 1000
 		cycles_elapsed := end_cycle_count - last_cycle_count
-
-		ms_per_frame := cast(f32)counter_elapsed / cast(f32)perf_counter_frequency
-		frames_per_sec := 1000.0 / ms_per_frame
 		mega_cycle_count := cast(f32)cycles_elapsed / (1000.0 * 1000.0)
 
+		work_seconds_elapsed := win32_get_seconds_elapsed(last_counter, win32_get_wall_clock())
+		seconds_elapsed_for_frame := work_seconds_elapsed
+		if seconds_elapsed_for_frame < target_seconds_per_frame {
+			for work_seconds_elapsed < target_seconds_per_frame {
+				if sleep_is_granular {
+					sleep_ms := (target_seconds_per_frame - work_seconds_elapsed) * 1000
+					win.Sleep(cast(u32)sleep_ms)
+				}
+				work_seconds_elapsed = win32_get_seconds_elapsed(
+					last_counter,
+					win32_get_wall_clock(),
+				)
+			}
+		}
 
+		ms_per_frame := work_seconds_elapsed * 1000.0
+		frames_per_sec := 1000.0 / ms_per_frame
 		Buff: [256]byte
 		dbg_str := strings.clone_to_cstring(
 			fmt.bprintfln(
@@ -692,15 +734,21 @@ main :: proc() {
 				(frames_per_sec * mega_cycle_count) / 1000.0,
 			),
 		)
+
 		win.OutputDebugStringA(dbg_str)
 
-		last_cycle_count = end_cycle_count
-		last_counter = end_counter
 
+		last_counter = win32_get_wall_clock()
+		last_cycle_count = end_cycle_count
 	}
 
+	if mmrt_handle != nil {
+		AvRevertMmThreadCharacteristics(mmrt_handle)
+	}
+
+	win.timeEndPeriod(1)
 	win32_destroy_audio_resources(&audio_resources)
 	win.CoUninitialize()
-
+	// TODO(kevin): msg is uninitialized
 	os.exit(cast(int)msg.wParam)
 }
