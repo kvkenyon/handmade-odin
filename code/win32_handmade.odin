@@ -515,13 +515,13 @@ win32_main_window_callback :: proc "stdcall" (
 	return result
 }
 
-win32_get_wall_clock :: proc() -> LARGE_INTEGER {
+win32_get_wall_clock :: #force_inline proc() -> LARGE_INTEGER {
 	result: LARGE_INTEGER
 	win.QueryPerformanceCounter(&result)
 	return result
 }
 
-win32_get_seconds_elapsed :: proc(start: LARGE_INTEGER, end: LARGE_INTEGER) -> f32 {
+win32_get_seconds_elapsed :: #force_inline proc(start: LARGE_INTEGER, end: LARGE_INTEGER) -> f32 {
 	diff := cast(f32)(end - start)
 	return diff / cast(f32)perf_counter_frequency
 }
@@ -620,6 +620,7 @@ main :: proc() {
 
 	msg: win.MSG
 
+	device_context := win.GetDC(window)
 
 	last_cycle_count: i64 = intrinsics.read_cycle_counter()
 
@@ -686,8 +687,44 @@ main :: proc() {
 
 		update_and_render(&memory, &game_sound_buffer, &game_offscreen_buffer, &new_input)
 
-		device_context := win.GetDC(window)
-		defer win.ReleaseDC(window, device_context)
+		temp_input := new_input
+		new_input = old_input
+		old_input = temp_input
+
+		work_counter := win32_get_wall_clock()
+		work_seconds_elapsed := win32_get_seconds_elapsed(last_counter, work_counter)
+
+		seconds_elapsed_for_frame := work_seconds_elapsed
+		if seconds_elapsed_for_frame < target_seconds_per_frame {
+			sleep_ms := cast(DWORD)(1000.0 *
+				(target_seconds_per_frame - seconds_elapsed_for_frame))
+			sleep_ms -= 1
+			if sleep_is_granular && sleep_ms > 0 {
+				win.Sleep(sleep_ms)
+			}
+			test_counter := win32_get_wall_clock()
+			test_seconds_elapsed_for_frame := win32_get_seconds_elapsed(last_counter, test_counter)
+			for seconds_elapsed_for_frame < target_seconds_per_frame {
+				seconds_elapsed_for_frame = win32_get_seconds_elapsed(
+					last_counter,
+					win32_get_wall_clock(),
+				)
+			}
+		} else {
+			assert(false, "missed frame")
+		}
+		// Timing
+		end_counter := win32_get_wall_clock()
+		ms_per_frame := win32_get_seconds_elapsed(last_counter, end_counter) * 1000
+		last_counter = end_counter
+		frames_per_sec := 1000.0 / ms_per_frame
+
+		// Profile
+		end_cycle_count: i64 = intrinsics.read_cycle_counter()
+		cycles_elapsed := end_cycle_count - last_cycle_count
+		mega_cycle_count := cast(f32)cycles_elapsed / (1000.0 * 1000.0)
+		last_cycle_count = end_cycle_count
+
 		window_width, window_height := win32_get_window_dimensions(window)
 		win32_copy_buffer_to_window(
 			device_context,
@@ -698,31 +735,6 @@ main :: proc() {
 			window_height,
 		)
 
-		temp_input := new_input
-		new_input = old_input
-		old_input = temp_input
-
-		end_cycle_count: i64 = intrinsics.read_cycle_counter()
-		cycles_elapsed := end_cycle_count - last_cycle_count
-		mega_cycle_count := cast(f32)cycles_elapsed / (1000.0 * 1000.0)
-
-		work_seconds_elapsed := win32_get_seconds_elapsed(last_counter, win32_get_wall_clock())
-		seconds_elapsed_for_frame := work_seconds_elapsed
-		if seconds_elapsed_for_frame < target_seconds_per_frame {
-			for work_seconds_elapsed < target_seconds_per_frame {
-				if sleep_is_granular {
-					sleep_ms := (target_seconds_per_frame - work_seconds_elapsed) * 1000
-					win.Sleep(cast(u32)sleep_ms)
-				}
-				work_seconds_elapsed = win32_get_seconds_elapsed(
-					last_counter,
-					win32_get_wall_clock(),
-				)
-			}
-		}
-
-		ms_per_frame := work_seconds_elapsed * 1000.0
-		frames_per_sec := 1000.0 / ms_per_frame
 		Buff: [256]byte
 		dbg_str := strings.clone_to_cstring(
 			fmt.bprintfln(
@@ -734,12 +746,7 @@ main :: proc() {
 				(frames_per_sec * mega_cycle_count) / 1000.0,
 			),
 		)
-
 		win.OutputDebugStringA(dbg_str)
-
-
-		last_counter = win32_get_wall_clock()
-		last_cycle_count = end_cycle_count
 	}
 
 	if mmrt_handle != nil {
