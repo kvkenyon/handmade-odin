@@ -122,12 +122,18 @@ update_and_render :: proc(
 	}
 
 	for controller in game_input.controllers {
+		if !controller.is_connected do continue
+
 		if (controller.is_analog) {
 			// NOTE(kevin): Use analog movement tuning
 			game_state.x_offset += cast(int)(4.0 * (controller.stick_average_x))
-			game_state.tone_hz = 256.0 + (128.0 * (controller.stick_average_y))
+			game_state.tone_hz = 220.0 + (128.0 * (controller.stick_average_y))
 		} else {
 			// NOTE(kevin): Use digital movement tuning
+			digital_y: f32 = 0.0
+			if controller.move_up.ended_down do digital_y = 1.0
+			if controller.move_down.ended_down do digital_y = -1.0
+			game_state.tone_hz = max(220.0 + (128.0 * digital_y), 20.0)
 		}
 		if controller.move_up.ended_down do game_state.y_offset -= 1
 		if controller.move_down.ended_down do game_state.y_offset += 1

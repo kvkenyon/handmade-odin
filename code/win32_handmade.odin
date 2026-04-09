@@ -129,16 +129,20 @@ NUM_BUFFER :: 3
 CHANNELS :: 2
 
 Win32_Sound_Output :: struct {
-	samples_per_second: DWORD,
-	bytes_per_sample:   INT,
-	channels:           WORD,
+	samples_per_second:       DWORD,
+	bytes_per_sample:         INT,
+	channels:                 WORD,
+	target_seconds_per_frame: f32,
+	frame_latency:            WORD,
 }
 
 Win32_Audio_Resources :: struct {
 	xaudio2:         ^xa2.IXAudio2,
 	mastering_voice: ^xa2.IXAudio2MasteringVoice,
 	source_voice:    ^xa2.IXAudio2SourceVoice,
-	sound_buffer:    rawptr,
+	sound_buffer:    [NUM_BUFFER][^]i16,
+	size_in_bytes:   u32,
+	sample_count:    u32,
 }
 
 // Video
@@ -217,11 +221,6 @@ win32_copy_buffer_to_window :: proc "stdcall" (
 	)
 }
 
-win32_clear_sound_buffer :: proc(buffer: [^]u16, buffer_size: int) {
-	for i in 0 ..< buffer_size {
-		buffer[i] = 0
-	}
-}
 
 win32_init_xaudio2 :: proc(soundout: Win32_Sound_Output) -> Win32_Audio_Resources {
 	audio_resources := Win32_Audio_Resources{}
@@ -264,33 +263,55 @@ win32_init_xaudio2 :: proc(soundout: Win32_Sound_Output) -> Win32_Audio_Resource
 		hresult,
 	) {win.OutputDebugStringA("Failed to init IXAudio2SourceVoice"); return audio_resources}
 
-	size_in_bytes :=
-		soundout.samples_per_second *
-		cast(DWORD)soundout.bytes_per_sample *
-		cast(DWORD)soundout.channels *
-		NUM_BUFFER
+	// 33.33 ms / frame
+	// 44,100 samples / s
+	// 44.1 samples / ms
+	// 33.3 * 44.1 = 1470 samples / frame
+	// 1470 samples / frame * 2 (latency) = 3000 samples per frame
 
-	sound_buffer := cast([^]byte)win.VirtualAlloc(
+	ms_per_frame := 1000 * soundout.target_seconds_per_frame
+	samples_per_ms := f32(soundout.samples_per_second) / 1000
+	samples_per_frame := samples_per_ms * ms_per_frame * f32(soundout.frame_latency)
+
+	size_in_bytes :=
+		u32(samples_per_frame) * u32(soundout.bytes_per_sample) * u32(soundout.channels)
+
+	total_size := size_in_bytes * NUM_BUFFER
+	raw := win.VirtualAlloc(
 		nil,
-		cast(win.SIZE_T)size_in_bytes,
-		win.MEM_COMMIT,
+		cast(win.SIZE_T)total_size,
+		win.MEM_COMMIT | win.MEM_RESERVE,
 		win.PAGE_READWRITE,
 	)
 
-	win32_clear_sound_buffer(
-		cast([^]u16)sound_buffer,
-		cast(int)soundout.samples_per_second * CHANNELS * NUM_BUFFER,
-	)
+	sound_buffer: [NUM_BUFFER][^]i16
+	for i in 0 ..< NUM_BUFFER {
+		offset := cast(uintptr)(u32(i) * size_in_bytes)
+		sound_buffer[i] = cast([^]i16)(cast(uintptr)raw + offset)
+	}
 
-	hresult = p_xaudio2_source_voice.Start(p_xaudio2_source_voice, {}, 0)
-	if win.FAILED(hresult) {win.OutputDebugStringA("Start failed\n"); return audio_resources}
 
 	return Win32_Audio_Resources {
 		xaudio2 = xaudio2,
 		mastering_voice = p_xaudio2_mastering_voice,
 		source_voice = p_xaudio2_source_voice,
 		sound_buffer = sound_buffer,
+		size_in_bytes = size_in_bytes,
+		sample_count = u32(samples_per_frame),
 	}
+}
+
+win32_submit_sound_buffer :: proc(
+	audio: ^Win32_Audio_Resources,
+	game_sound_buffer: ^Game_Sound_Buffer,
+) {
+	xaudio2_buffer: xa2.BUFFER
+	xaudio2_buffer.AudioBytes = audio.size_in_bytes
+	xaudio2_buffer.Flags = {xa2.FLAG.END_OF_STREAM}
+	xaudio2_buffer.pAudioData = cast([^]u8)game_sound_buffer.samples
+
+	hresult := audio.source_voice->SubmitSourceBuffer(&xaudio2_buffer)
+	if win.FAILED(hresult) {win.OutputDebugStringA("SubmitSourceBuffer failed\n")}
 }
 
 win32_destroy_audio_resources :: proc(audio_resources: ^Win32_Audio_Resources) {
@@ -603,20 +624,6 @@ main :: proc() {
 	hr := win.CoInitializeEx(nil, .MULTITHREADED)
 	assert(win.SUCCEEDED(hr), "CoInitializeEx failed")
 
-	current_sound_buffer := 0
-
-	soundout := Win32_Sound_Output {
-		samples_per_second = 44_100,
-		bytes_per_sample   = size_of(i16),
-		channels           = CHANNELS,
-	}
-
-	size_in_bytes :=
-		soundout.samples_per_second *
-		cast(DWORD)soundout.bytes_per_sample *
-		cast(DWORD)soundout.channels
-
-	audio_resources := win32_init_xaudio2(soundout)
 
 	msg: win.MSG
 
@@ -631,6 +638,18 @@ main :: proc() {
 	game_update_hz := monitor_refresh_hz / 2
 	target_seconds_per_frame := 1.0 / cast(f32)game_update_hz
 
+	soundout := Win32_Sound_Output {
+		samples_per_second       = 44_100,
+		bytes_per_sample         = size_of(i16),
+		channels                 = CHANNELS,
+		frame_latency            = 1,
+		target_seconds_per_frame = target_seconds_per_frame,
+	}
+
+
+	current_sound_buffer := 0
+	audio_resources := win32_init_xaudio2(soundout)
+
 	RUNNING = true
 	new_input := Game_Input{}
 	old_input := Game_Input{}
@@ -643,40 +662,10 @@ main :: proc() {
 		for i in 0 ..< len(old_keyboard_controller.buttons) {
 			new_keyboard_controller.buttons[i] = old_keyboard_controller.buttons[i]
 		}
+		new_keyboard_controller.is_connected = true
 
 		win32_process_pending_messages(new_keyboard_controller)
 		win32_handle_gamepad(&old_input, &new_input)
-
-		state: xa2.VOICE_STATE
-		audio_resources.source_voice.GetState(audio_resources.source_voice, &state)
-
-		// TODO(kevin): The audio timing is severly off. We are submitting buffers
-		// too far into the future for the current frame. We need synchronization.
-		game_sound_buffer: Game_Sound_Buffer
-		if state.BuffersQueued < NUM_BUFFER {
-			sub_buffer := cast([^]i16)audio_resources.sound_buffer
-			sub_buffer = sub_buffer[current_sound_buffer *
-			cast(int)soundout.samples_per_second *
-			CHANNELS:]
-
-			game_sound_buffer = Game_Sound_Buffer {
-				sample_count       = cast(int)soundout.samples_per_second,
-				samples            = sub_buffer,
-				samples_per_second = cast(int)soundout.samples_per_second,
-			}
-
-			xaudio2_buffer: xa2.BUFFER
-			xaudio2_buffer.AudioBytes = cast(u32)size_in_bytes
-			xaudio2_buffer.pAudioData = cast([^]u8)sub_buffer
-
-			hresult := audio_resources.source_voice.SubmitSourceBuffer(
-				audio_resources.source_voice,
-				&xaudio2_buffer,
-			)
-			if win.FAILED(hresult) {win.OutputDebugStringA("SubmitSourceBuffer failed\n")}
-			audio_resources.source_voice.GetState(audio_resources.source_voice, &state)
-			current_sound_buffer = (current_sound_buffer + 1) % NUM_BUFFER
-		}
 
 		game_offscreen_buffer := Game_Offscreen_Buffer {
 			width           = bitmap_buffer.width,
@@ -685,7 +674,28 @@ main :: proc() {
 			bytes_per_pixel = bitmap_buffer.bytes_per_pixel,
 		}
 
-		update_and_render(&memory, &game_sound_buffer, &game_offscreen_buffer, &new_input)
+		state: xa2.VOICE_STATE
+		audio_resources.source_voice->GetState(&state)
+		if state.BuffersQueued < NUM_BUFFER {
+			game_sound_buffer := Game_Sound_Buffer {
+				sample_count       = cast(int)audio_resources.sample_count,
+				samples            = audio_resources.sound_buffer[current_sound_buffer % NUM_BUFFER],
+				samples_per_second = cast(int)soundout.samples_per_second,
+			}
+			current_sound_buffer += 1
+			update_and_render(&memory, &game_sound_buffer, &game_offscreen_buffer, &new_input)
+			win32_submit_sound_buffer(&audio_resources, &game_sound_buffer)
+		} else {
+			game_sound_buffer := Game_Sound_Buffer{}
+			update_and_render(&memory, &game_sound_buffer, &game_offscreen_buffer, &new_input)
+		}
+
+
+		// TODO(kevin): Need to clean this up a bit. If the buffer starves we need to
+		// restart.
+		if current_sound_buffer == 1 {
+			audio_resources.source_voice->Start()
+		}
 
 		temp_input := new_input
 		new_input = old_input
@@ -711,8 +721,9 @@ main :: proc() {
 				)
 			}
 		} else {
-			assert(false, "missed frame")
+			win.OutputDebugStringA("Missed frame.\n")
 		}
+
 		// Timing
 		end_counter := win32_get_wall_clock()
 		ms_per_frame := win32_get_seconds_elapsed(last_counter, end_counter) * 1000
