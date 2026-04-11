@@ -1,8 +1,10 @@
 #+build windows
-package game
+package main
 
+import p "../platform"
 import "base:intrinsics"
 import "base:runtime"
+import "core:dynlib"
 import "core:fmt"
 import os "core:os"
 import "core:strings"
@@ -17,7 +19,6 @@ foreign avrt {
 	AvRevertMmThreadCharacteristics :: proc(AvrtHandle: win.HANDLE) -> win.BOOL ---
 }
 
-HANDMADE_INTERNAL :: #config(HANDMADE_INTERNAL, false)
 
 LONG :: win.LONG
 INT :: win.INT
@@ -39,92 +40,8 @@ Megabytes :: #force_inline proc(value: u64) -> u64 {return Kilobytes(value) * 10
 Gigabytes :: #force_inline proc(value: u64) -> u64 {return Megabytes(value) * 1024}
 Terabytes :: #force_inline proc(value: u64) -> u64 {return Gigabytes(value) * 1024}
 
-// DEBUG File I/O
-
-when HANDMADE_INTERNAL {
-	debug_platform_read_entire_file :: proc(filename: cstring16) -> Debug_Read_Result {
-		result := Debug_Read_Result{}
-		handle := win.CreateFileW(
-			filename,
-			win.GENERIC_READ,
-			win.FILE_SHARE_READ,
-			nil,
-			win.OPEN_EXISTING,
-			0,
-			nil,
-		)
-
-		if handle != win.INVALID_HANDLE {
-			file_size: win.LARGE_INTEGER
-			if (win.GetFileSizeEx(handle, &file_size)) {
-				result.contents = win.VirtualAlloc(
-					nil,
-					cast(uint)file_size,
-					win.MEM_RESERVE | win.MEM_COMMIT,
-					win.PAGE_READWRITE,
-				)
-				if result.contents != nil {
-					read_bytes: DWORD
-					if (win.ReadFile(
-							   handle,
-							   result.contents,
-							   cast(u32)file_size,
-							   &read_bytes,
-							   nil,
-						   ) &&
-						   read_bytes == cast(u32)file_size) {
-						result.contents_size = cast(u32)file_size
-					} else {
-						// TODO(kevin): logging
-					}
-
-				} else {
-					// TODO(kevin): logging
-				}
-
-			} else {
-				// TODO(kevin): logging
-			}
-			win.CloseHandle(handle)
-		} else {
-			// TODO(Kevin): logging
-		}
-
-		return result
-	}
-
-	debug_platform_write_entire_file :: proc(
-		filename: cstring16,
-		memory_size: DWORD,
-		memory: rawptr,
-	) -> bool {
-		result := false
-		handle := win.CreateFileW(filename, win.GENERIC_WRITE, 0, nil, win.CREATE_ALWAYS, 0, nil)
-
-		if handle != win.INVALID_HANDLE {
-			bytes_written: DWORD
-			if win.WriteFile(handle, memory, memory_size, &bytes_written, nil) {
-				result = bytes_written == memory_size
-			} else {
-				// TODO(kevin): logging
-			}
-			win.CloseHandle(handle)
-		} else {
-			// TODO(kevin): logging
-		}
-
-		return result
-	}
-
-	debug_platform_free_file_memory :: proc(memory: rawptr) {
-		if memory != nil {
-			win.VirtualFree(memory, 0, win.MEM_RELEASE)
-		}
-	}
-}
 
 // XAudio2
-
 NUM_BUFFER :: 3
 CHANNELS :: 2
 
@@ -146,7 +63,6 @@ Win32_Audio_Resources :: struct {
 }
 
 // Video
-
 Win32_Offscreen_Buffer :: struct {
 	info:            win.BITMAPINFO,
 	memory:          rawptr,
@@ -303,7 +219,7 @@ win32_init_xaudio2 :: proc(soundout: Win32_Sound_Output) -> Win32_Audio_Resource
 
 win32_submit_sound_buffer :: proc(
 	audio: ^Win32_Audio_Resources,
-	game_sound_buffer: ^Game_Sound_Buffer,
+	game_sound_buffer: ^p.Game_Sound_Buffer,
 ) {
 	xaudio2_buffer: xa2.BUFFER
 	xaudio2_buffer.AudioBytes = audio.size_in_bytes
@@ -322,8 +238,8 @@ win32_destroy_audio_resources :: proc(audio_resources: ^Win32_Audio_Resources) {
 }
 
 win32_process_xinput_digital_button :: proc(
-	old_button_state: ^Game_Button_State,
-	new_button_state: ^Game_Button_State,
+	old_button_state: ^p.Game_Button_State,
+	new_button_state: ^p.Game_Button_State,
 	is_down: bool,
 ) {
 	new_button_state.half_transition_count = old_button_state.ended_down != is_down ? 1 : 0
@@ -341,12 +257,12 @@ win32_process_xinput_stick :: proc(stick_value: win.SHORT, deadzone_value: win.S
 	return result
 }
 
-win32_process_keyboard_message :: proc(button_state: ^Game_Button_State, is_down: bool) {
+win32_process_keyboard_message :: proc(button_state: ^p.Game_Button_State, is_down: bool) {
 	button_state.half_transition_count += 1
 	button_state.ended_down = is_down
 }
 
-win32_handle_gamepad :: proc(old_input: ^Game_Input, new_input: ^Game_Input) {
+win32_handle_gamepad :: proc(old_input: ^p.Game_Input, new_input: ^p.Game_Input) {
 	for idx: DWORD = 0; idx < win.XUSER_MAX_COUNT; idx += 1 {
 		state: win.XINPUT_STATE
 		result := win.XInputGetState(cast(win.XUSER)idx, &state)
@@ -457,7 +373,7 @@ win32_handle_gamepad :: proc(old_input: ^Game_Input, new_input: ^Game_Input) {
 	}
 }
 
-win32_process_pending_messages :: proc(new_controller: ^Game_Controller_Input) {
+win32_process_pending_messages :: proc(new_controller: ^p.Game_Controller_Input) {
 	msg: win.MSG
 	for win.PeekMessageW(&msg, nil, 0, 0, win.PM_REMOVE) {
 		if msg.message == win.WM_QUIT do RUNNING = false
@@ -547,6 +463,98 @@ win32_get_seconds_elapsed :: #force_inline proc(start: LARGE_INTEGER, end: LARGE
 	return diff / cast(f32)perf_counter_frequency
 }
 
+// ------- Game API -------- //
+// ---Support hot reloads -- //
+// --------------------------//
+
+Game_API :: struct {
+	lib:               dynlib.Library,
+	update_and_render: proc(
+		game_memory: ^p.Game_Memory,
+		game_sound: ^p.Game_Sound_Buffer,
+		game_offscreen_buffer: ^p.Game_Offscreen_Buffer,
+		game_input: ^p.Game_Input,
+	),
+	force_reload:      proc() -> bool,
+	force_restart:     proc() -> bool,
+	modification_time: win.FILETIME,
+	api_version:       int,
+}
+
+win32_copy_dll :: proc(to: cstring16) {
+	from := win.utf8_to_wstring("game.dll")
+	result := win.CopyFileW(from, to, win.FALSE)
+	if result == win.FALSE {
+		error_code := win.GetLastError()
+		buf: [64]byte
+		msg := fmt.bprintf(buf[:], "CopyFileW failed, error: {}\n", error_code)
+		win.OutputDebugStringA(strings.clone_to_cstring(msg))
+	}
+}
+import "core:c/libc"
+DLL_EXT :: ".dll"
+
+copy_dll :: proc(to: string) -> bool {
+	exit := libc.system(fmt.ctprintf("copy game.dll {0}", to))
+
+	if exit != 0 {
+		fmt.printfln("Failed to copy game" + DLL_EXT + " to {0}", to)
+		return false
+	}
+
+	return true
+}
+
+
+load_game_api :: proc(api_version: int) -> (api: Game_API, ok: bool) {
+	mod_time := win32_get_last_write_time("game.dll")
+	game_dll_name := fmt.tprintf("game_{0}.dll", api_version)
+	fmt.println("New DLL name: %s", game_dll_name)
+	copy_dll(game_dll_name)
+	_, ok = dynlib.initialize_symbols(&api, game_dll_name, "", "lib")
+	if !ok {
+		fmt.printfln("Failed initializing symbols: {0}", dynlib.last_error())
+		ok = false
+		return
+	}
+
+	api.api_version = api_version
+	api.modification_time = mod_time
+	ok = true
+
+	return
+}
+
+unload_game_api :: proc(api: ^Game_API) -> bool {
+	if api.lib != nil {
+		if !dynlib.unload_library(api.lib) {
+			fmt.printfln("Failed unloading lib: {0}", dynlib.last_error())
+			return false
+		}
+	}
+
+	if os.remove(fmt.tprintf("game_{0}.dll", api.api_version)) != nil {
+		fmt.printfln("Failed to remove game_{0}.dll copy", api.api_version)
+		return false
+	}
+	return true
+
+}
+
+win32_get_last_write_time :: proc(filename: string) -> win.FILETIME {
+	LastWriteTime: win.FILETIME
+
+	FindData: win.WIN32_FIND_DATAW
+	FindHandle := win.FindFirstFileW(win.utf8_to_wstring(filename), &FindData)
+	if (FindHandle != win.INVALID_HANDLE_VALUE) {
+		LastWriteTime = FindData.ftLastWriteTime
+		win.FindClose(FindHandle)
+	}
+
+	return LastWriteTime
+}
+
+
 main :: proc() {
 	instance := win.HINSTANCE(win.GetModuleHandleW(nil))
 	assert(instance != nil, "Failed to fetch hInstance.")
@@ -587,7 +595,7 @@ main :: proc() {
 	assert(window != nil, "Window creation Failed")
 
 	base_address: win.LPVOID = nil
-	when HANDMADE_INTERNAL {
+	when p.HANDMADE_INTERNAL {
 		base_address = cast(rawptr)cast(uintptr)Terabytes(2)
 	}
 
@@ -609,7 +617,7 @@ main :: proc() {
 	assert(permanent_storage != nil, "Permanent storage failed to allocate.")
 	assert(transient_storage != nil, "Transient storage failed to allocate.")
 
-	memory := Game_Memory {
+	memory := p.Game_Memory {
 		permanent_storage_size = permanent_storage_size,
 		permanent_storage      = permanent_storage,
 		transient_storage_size = transient_storage_size,
@@ -650,14 +658,39 @@ main :: proc() {
 	current_sound_buffer := 0
 	audio_resources := win32_init_xaudio2(soundout)
 
+	game_api_version := 0
+	game_api, game_api_ok := load_game_api(game_api_version)
+
+	if !game_api_ok {
+		fmt.println("Failed to load Game API")
+		return
+	}
+
+	game_api_version += 1
+
 	RUNNING = true
-	new_input := Game_Input{}
-	old_input := Game_Input{}
+	new_input := p.Game_Input{}
+	old_input := p.Game_Input{}
 
 	last_counter := win32_get_wall_clock()
 	for RUNNING {
+		reload := false
+		last_file_write_time := win32_get_last_write_time("game.dll")
+
+		if win.CompareFileTime(&last_file_write_time, &game_api.modification_time) != 0 {
+			reload = true
+		}
+
+		if reload {
+			new_game_api, new_game_api_ok := load_game_api(game_api_version)
+			if new_game_api_ok {
+				game_api = new_game_api
+				game_api_version += 1
+			}
+		}
+
 		old_keyboard_controller := old_input.controllers[0]
-		new_input.controllers[0] = Game_Controller_Input{}
+		new_input.controllers[0] = p.Game_Controller_Input{}
 		new_keyboard_controller := &new_input.controllers[0]
 		for i in 0 ..< len(old_keyboard_controller.buttons) {
 			new_keyboard_controller.buttons[i] = old_keyboard_controller.buttons[i]
@@ -667,7 +700,7 @@ main :: proc() {
 		win32_process_pending_messages(new_keyboard_controller)
 		win32_handle_gamepad(&old_input, &new_input)
 
-		game_offscreen_buffer := Game_Offscreen_Buffer {
+		game_offscreen_buffer := p.Game_Offscreen_Buffer {
 			width           = bitmap_buffer.width,
 			height          = bitmap_buffer.height,
 			memory          = bitmap_buffer.memory,
@@ -677,17 +710,27 @@ main :: proc() {
 		state: xa2.VOICE_STATE
 		audio_resources.source_voice->GetState(&state)
 		if state.BuffersQueued < NUM_BUFFER {
-			game_sound_buffer := Game_Sound_Buffer {
+			game_sound_buffer := p.Game_Sound_Buffer {
 				sample_count       = cast(int)audio_resources.sample_count,
 				samples            = audio_resources.sound_buffer[current_sound_buffer % NUM_BUFFER],
 				samples_per_second = cast(int)soundout.samples_per_second,
 			}
 			current_sound_buffer += 1
-			update_and_render(&memory, &game_sound_buffer, &game_offscreen_buffer, &new_input)
+			game_api.update_and_render(
+				&memory,
+				&game_sound_buffer,
+				&game_offscreen_buffer,
+				&new_input,
+			)
 			win32_submit_sound_buffer(&audio_resources, &game_sound_buffer)
 		} else {
-			game_sound_buffer := Game_Sound_Buffer{}
-			update_and_render(&memory, &game_sound_buffer, &game_offscreen_buffer, &new_input)
+			game_sound_buffer := p.Game_Sound_Buffer{}
+			game_api.update_and_render(
+				&memory,
+				&game_sound_buffer,
+				&game_offscreen_buffer,
+				&new_input,
+			)
 		}
 
 
