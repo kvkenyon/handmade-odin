@@ -60,6 +60,8 @@ Game_State :: struct {
 	y_offset: int,
 	tone_hz:  f32,
 	phase:    f32,
+	player_x: int,
+	player_y: int,
 }
 
 Game_Memory :: struct {

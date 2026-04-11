@@ -4,6 +4,7 @@ package main
 import p "../platform"
 import "base:intrinsics"
 import "base:runtime"
+import "core:c/libc"
 import "core:dynlib"
 import "core:fmt"
 import os "core:os"
@@ -463,10 +464,6 @@ win32_get_seconds_elapsed :: #force_inline proc(start: LARGE_INTEGER, end: LARGE
 	return diff / cast(f32)perf_counter_frequency
 }
 
-// ------- Game API -------- //
-// ---Support hot reloads -- //
-// --------------------------//
-
 Game_API :: struct {
 	lib:               dynlib.Library,
 	update_and_render: proc(
@@ -481,35 +478,19 @@ Game_API :: struct {
 	api_version:       int,
 }
 
-win32_copy_dll :: proc(to: cstring16) {
-	from := win.utf8_to_wstring("game.dll")
-	result := win.CopyFileW(from, to, win.FALSE)
-	if result == win.FALSE {
-		error_code := win.GetLastError()
-		buf: [64]byte
-		msg := fmt.bprintf(buf[:], "CopyFileW failed, error: {}\n", error_code)
-		win.OutputDebugStringA(strings.clone_to_cstring(msg))
-	}
-}
-import "core:c/libc"
-DLL_EXT :: ".dll"
 
 copy_dll :: proc(to: string) -> bool {
 	exit := libc.system(fmt.ctprintf("copy game.dll {0}", to))
-
 	if exit != 0 {
-		fmt.printfln("Failed to copy game" + DLL_EXT + " to {0}", to)
+		fmt.printfln("Failed to copy game.dll to {0}", to)
 		return false
 	}
-
 	return true
 }
-
 
 load_game_api :: proc(api_version: int) -> (api: Game_API, ok: bool) {
 	mod_time := win32_get_last_write_time("game.dll")
 	game_dll_name := fmt.tprintf("game_{0}.dll", api_version)
-	fmt.println("New DLL name: %s", game_dll_name)
 	copy_dll(game_dll_name)
 	_, ok = dynlib.initialize_symbols(&api, game_dll_name, "", "lib")
 	if !ok {
@@ -517,11 +498,9 @@ load_game_api :: proc(api_version: int) -> (api: Game_API, ok: bool) {
 		ok = false
 		return
 	}
-
 	api.api_version = api_version
 	api.modification_time = mod_time
 	ok = true
-
 	return
 }
 
@@ -538,7 +517,6 @@ unload_game_api :: proc(api: ^Game_API) -> bool {
 		return false
 	}
 	return true
-
 }
 
 win32_get_last_write_time :: proc(filename: string) -> win.FILETIME {

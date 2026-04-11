@@ -16,10 +16,10 @@ game_output_sound :: proc(game_state: ^p.Game_State, sound_buffer: ^p.Game_Sound
 		sample := i16(math.sin(game_state.phase) * 32767.0 * tone_volume)
 
 		// Channel 1
-		sound_buffer.samples[i] = sample
+		sound_buffer.samples[i] = 0
 		i += 1
 		// Channel 2
-		sound_buffer.samples[i] = sample
+		sound_buffer.samples[i] = 0
 		i += 1
 	}
 }
@@ -32,8 +32,21 @@ render_gradient :: proc(buffer: ^p.Game_Offscreen_Buffer, game_state: ^p.Game_St
 		row := bitmap_memory32[row_idx:offset]
 		for x in 0 ..< buffer.width {
 			blue := cast(u32)(u8(cast(i32)game_state.x_offset + x))
-			green := cast(u32)(u8(cast(i32)game_state.y_offset + y)) << 8
+			green := cast(u32)(u8(cast(i32)game_state.y_offset + y)) << 16
 			row[x] = blue | green
+		}
+	}
+}
+
+render_player :: proc(buffer: ^p.Game_Offscreen_Buffer, player_x: int, player_y: int) {
+	top := player_y
+	bottom := top + 10
+	bitmap_memory32 := cast([^]u32)buffer.memory
+
+	for x := player_x; x < player_x + 10; x += 1 {
+		for y := top; y < bottom; y += 1 {
+			row_idx := y * int(buffer.width)
+			bitmap_memory32[row_idx + x] = 0xFFFFFFFF
 		}
 	}
 }
@@ -52,6 +65,8 @@ update_and_render :: proc(
 		game_state.tone_hz = 220.0
 		game_memory.is_initialized = true
 		game_state.phase = 0.0
+		game_state.player_x = 100
+		game_state.player_y = 100
 
 		filename: cstring16 = "win32_handmade.odin"
 		when p.HANDMADE_INTERNAL {
@@ -79,13 +94,14 @@ update_and_render :: proc(
 			if controller.move_down.ended_down do digital_y = -1.0
 			game_state.tone_hz = max(220.0 + (128.0 * digital_y), 20.0)
 		}
-		if controller.move_up.ended_down do game_state.y_offset -= 1
-		if controller.move_down.ended_down do game_state.y_offset += 1
-		if controller.move_left.ended_down do game_state.x_offset -= 1
-		if controller.move_right.ended_down do game_state.x_offset += 1
+		if controller.move_up.ended_down {game_state.y_offset += 1; game_state.player_y -= 5}
+		if controller.move_down.ended_down {game_state.y_offset -= 1; game_state.player_y += 5}
+		if controller.move_left.ended_down {game_state.x_offset -= 1; game_state.player_x -= 5}
+		if controller.move_right.ended_down {game_state.x_offset += 1; game_state.player_x += 5}
 	}
 	if game_sound != nil {
 		game_output_sound(game_state, game_sound)
 	}
 	render_gradient(game_offscreen_buffer, game_state)
+	render_player(game_offscreen_buffer, game_state.player_x, game_state.player_y)
 }
