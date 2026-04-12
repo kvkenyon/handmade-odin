@@ -41,6 +41,15 @@ Megabytes :: #force_inline proc(value: u64) -> u64 {return Kilobytes(value) * 10
 Gigabytes :: #force_inline proc(value: u64) -> u64 {return Megabytes(value) * 1024}
 Terabytes :: #force_inline proc(value: u64) -> u64 {return Gigabytes(value) * 1024}
 
+Win32_State :: struct {
+	recording_handle:      win.HANDLE,
+	input_recording_index: int,
+	playback_handle:       win.HANDLE,
+	input_playback_index:  int,
+	game_memory_block:     rawptr,
+	total_size:            u64,
+}
+
 
 // XAudio2
 NUM_BUFFER :: 3
@@ -125,8 +134,8 @@ win32_copy_buffer_to_window :: proc "stdcall" (
 		device_context,
 		x,
 		y,
-		window_width,
-		window_height,
+		buffer.width,
+		buffer.height,
 		x,
 		y,
 		buffer.width,
@@ -259,8 +268,10 @@ win32_process_xinput_stick :: proc(stick_value: win.SHORT, deadzone_value: win.S
 }
 
 win32_process_keyboard_message :: proc(button_state: ^p.Game_Button_State, is_down: bool) {
-	button_state.half_transition_count += 1
-	button_state.ended_down = is_down
+	if button_state.ended_down != is_down {
+		button_state.half_transition_count += 1
+		button_state.ended_down = is_down
+	}
 }
 
 win32_handle_gamepad :: proc(old_input: ^p.Game_Input, new_input: ^p.Game_Input) {
@@ -374,11 +385,23 @@ win32_handle_gamepad :: proc(old_input: ^p.Game_Input, new_input: ^p.Game_Input)
 	}
 }
 
-win32_process_pending_messages :: proc(new_controller: ^p.Game_Controller_Input) {
+win32_process_pending_messages :: proc(
+	win32_state: ^Win32_State,
+	new_controller: ^p.Game_Controller_Input,
+	mouse: ^p.Game_Mouse,
+) {
 	msg: win.MSG
 	for win.PeekMessageW(&msg, nil, 0, 0, win.PM_REMOVE) {
 		if msg.message == win.WM_QUIT do RUNNING = false
 		switch msg.message {
+		// case win.WM_LBUTTONDOWN:
+		// 	mouse.buttons[0].ended_down = true
+		// case win.WM_LBUTTONUP:
+		// 	mouse.buttons[0].ended_down = false
+		// case win.WM_RBUTTONDOWN:
+		// 	mouse.buttons[1].ended_down = true
+		// case win.WM_RBUTTONUP:
+		// 	mouse.buttons[1].ended_down = false
 		case win.WM_KEYDOWN, win.WM_KEYUP, win.WM_SYSKEYUP, win.WM_SYSKEYDOWN:
 			vk_code := win.LOWORD(msg.wParam)
 			key_flags := win.HIWORD(msg.lParam)
@@ -411,6 +434,17 @@ win32_process_pending_messages :: proc(new_controller: ^p.Game_Controller_Input)
 					win32_process_keyboard_message(&new_controller.left_shoulder, is_down)
 				case 'E':
 					win32_process_keyboard_message(&new_controller.right_shoulder, is_down)
+				case 'L':
+					if is_down {
+						if win32_state.input_recording_index == 0 {
+							win32_begin_input_recording(win32_state, 1)
+							assert(win32_state.input_recording_index == 1)
+						} else {
+							win32_end_input_recording(win32_state)
+							win32_begin_input_playback(win32_state, 1)
+							assert(win32_state.input_playback_index == 1)
+						}
+					}
 				case:
 					break
 
@@ -419,6 +453,136 @@ win32_process_pending_messages :: proc(new_controller: ^p.Game_Controller_Input)
 		case:
 			win.TranslateMessage(&msg)
 			win.DispatchMessageW(&msg)
+		}
+	}
+}
+
+win32_begin_input_recording :: proc(
+	win32_state: ^Win32_State,
+	input_recording_index: int,
+) -> win.BOOL {
+	filename := "input.hmi"
+	win32_state.input_recording_index = input_recording_index
+	win32_state.recording_handle = win.CreateFileW(
+		win.utf8_to_wstring(filename),
+		win.GENERIC_WRITE,
+		0,
+		nil,
+		win.CREATE_ALWAYS,
+		0,
+		nil,
+	)
+	bytes_written: DWORD
+	result := win.WriteFile(
+		win32_state.recording_handle,
+		win32_state.game_memory_block,
+		u32(win32_state.total_size),
+		&bytes_written,
+		nil,
+	)
+	assert(bytes_written == DWORD(win32_state.total_size))
+	return result
+}
+
+win32_end_input_recording :: proc(win32_state: ^Win32_State) {
+	win.CloseHandle(win32_state.recording_handle)
+	win32_state.input_recording_index = 0
+}
+
+win32_error_exit :: proc "stdcall" () {
+	lp_msg_buf: win.LPVOID
+	last_error := win.GetLastError()
+	if win.FormatMessageW(
+		   win.FORMAT_MESSAGE_ALLOCATE_BUFFER |
+		   win.FORMAT_MESSAGE_FROM_SYSTEM |
+		   win.FORMAT_MESSAGE_IGNORE_INSERTS,
+		   nil,
+		   last_error,
+		   win.MAKELANGID(win.LANG_NEUTRAL, win.SUBLANG_DEFAULT),
+		   cast(win.LPWSTR)&lp_msg_buf,
+		   0,
+		   nil,
+	   ) ==
+	   0 {
+		win.MessageBoxW(nil, cast(win.LPCTSTR)lp_msg_buf, "Error", win.MB_OK)
+		win.LocalFree(lp_msg_buf)
+		win.ExitProcess(last_error)
+	}
+}
+
+win32_record_input :: proc(win32_state: ^Win32_State, new_input: ^p.Game_Input) -> win.BOOL {
+	bytes_written: DWORD
+	result := win.WriteFile(
+		win32_state.recording_handle,
+		new_input,
+		u32(size_of(new_input^)),
+		&bytes_written,
+		nil,
+	)
+	assert(bytes_written == DWORD(size_of(new_input^)))
+	if !result {
+		win32_error_exit()
+	}
+	return result
+}
+
+win32_begin_input_playback :: proc(win32_state: ^Win32_State, input_playback_index: int) {
+	filename := "input.hmi"
+	win32_state.input_playback_index = input_playback_index
+	win32_state.playback_handle = win.CreateFileW(
+		win.utf8_to_wstring(filename),
+		win.GENERIC_READ,
+		win.FILE_SHARE_READ,
+		nil,
+		win.OPEN_EXISTING,
+		0,
+		nil,
+	)
+	bytes_to_read := win32_state.total_size
+	bytes_read: DWORD
+	result := win.ReadFile(
+		win32_state.playback_handle,
+		win32_state.game_memory_block,
+		u32(bytes_to_read),
+		&bytes_read,
+		nil,
+	)
+	if !result {
+		win32_error_exit()
+	}
+}
+
+win32_end_input_playback :: proc(win32_state: ^Win32_State) {
+	win.CloseHandle(win32_state.playback_handle)
+	win32_state.input_playback_index = 0
+}
+
+win32_playback_input :: proc(win32_state: ^Win32_State, new_input: ^p.Game_Input) {
+	bytes_read: DWORD
+	result := win.ReadFile(
+		win32_state.playback_handle,
+		new_input,
+		size_of(new_input^),
+		&bytes_read,
+		nil,
+	)
+	if !result {
+		win32_error_exit()
+	}
+
+	if bytes_read == 0 {
+		playing_index := win32_state.input_playback_index
+		win32_end_input_playback(win32_state)
+		win32_begin_input_playback(win32_state, playing_index)
+		result = win.ReadFile(
+			win32_state.playback_handle,
+			new_input,
+			size_of(new_input^),
+			&bytes_read,
+			nil,
+		)
+		if !result {
+			win32_error_exit()
 		}
 	}
 }
@@ -581,13 +745,16 @@ main :: proc() {
 	transient_storage_size := Gigabytes(1)
 	total_size := permanent_storage_size + transient_storage_size
 
-
+	win32_state: Win32_State
+	win32_state.total_size = total_size
 	base := cast(uintptr)win.VirtualAlloc(
 		base_address,
 		cast(win.SIZE_T)total_size,
 		win.MEM_COMMIT | win.MEM_RESERVE,
 		win.PAGE_READWRITE,
 	)
+
+	win32_state.game_memory_block = cast(rawptr)base
 
 	permanent_storage := cast(rawptr)base
 	transient_storage := cast(rawptr)(base + cast(uintptr)permanent_storage_size)
@@ -632,7 +799,6 @@ main :: proc() {
 		target_seconds_per_frame = target_seconds_per_frame,
 	}
 
-
 	current_sound_buffer := 0
 	audio_resources := win32_init_xaudio2(soundout)
 
@@ -645,6 +811,7 @@ main :: proc() {
 	}
 
 	game_api_version += 1
+
 
 	RUNNING = true
 	new_input := p.Game_Input{}
@@ -675,14 +842,36 @@ main :: proc() {
 		}
 		new_keyboard_controller.is_connected = true
 
-		win32_process_pending_messages(new_keyboard_controller)
+		win32_process_pending_messages(&win32_state, new_keyboard_controller, &new_input.mouse)
 		win32_handle_gamepad(&old_input, &new_input)
+
+		point: win.POINT
+		win.GetCursorPos(&point)
+		win.ScreenToClient(window, &point)
+		new_input.mouse.x = point.x
+		new_input.mouse.y = point.y
+		win32_process_keyboard_message(
+			&new_input.mouse.buttons[0],
+			win.GetKeyState(win.VK_LBUTTON) < 0,
+		)
+		win32_process_keyboard_message(
+			&new_input.mouse.buttons[1],
+			win.GetKeyState(win.VK_RBUTTON) < 0,
+		)
 
 		game_offscreen_buffer := p.Game_Offscreen_Buffer {
 			width           = bitmap_buffer.width,
 			height          = bitmap_buffer.height,
 			memory          = bitmap_buffer.memory,
 			bytes_per_pixel = bitmap_buffer.bytes_per_pixel,
+		}
+
+		if win32_state.input_playback_index != 0 {
+			win32_playback_input(&win32_state, &new_input)
+		}
+
+		if win32_state.input_recording_index != 0 {
+			win32_record_input(&win32_state, &new_input)
 		}
 
 		state: xa2.VOICE_STATE
@@ -710,7 +899,6 @@ main :: proc() {
 				&new_input,
 			)
 		}
-
 
 		// TODO(kevin): Need to clean this up a bit. If the buffer starves we need to
 		// restart.

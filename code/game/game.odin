@@ -39,14 +39,15 @@ render_gradient :: proc(buffer: ^p.Game_Offscreen_Buffer, game_state: ^p.Game_St
 }
 
 render_player :: proc(buffer: ^p.Game_Offscreen_Buffer, player_x: int, player_y: int) {
+	if player_x < 0 || player_x + 10 >= cast(int)buffer.width do return
+	if player_y < 0 || player_y + 10 >= cast(int)buffer.height do return
 	top := player_y
 	bottom := top + 10
 	bitmap_memory32 := cast([^]u32)buffer.memory
-
 	for x := player_x; x < player_x + 10; x += 1 {
 		for y := top; y < bottom; y += 1 {
-			row_idx := y * int(buffer.width)
-			bitmap_memory32[row_idx + x] = 0xFFFFFFFF
+			offset := y * int(buffer.width) + x
+			bitmap_memory32[offset] = 0xFFFFFFFF
 		}
 	}
 }
@@ -99,9 +100,22 @@ update_and_render :: proc(
 		if controller.move_left.ended_down {game_state.x_offset -= 1; game_state.player_x -= 5}
 		if controller.move_right.ended_down {game_state.x_offset += 1; game_state.player_x += 5}
 	}
+
 	if game_sound != nil {
 		game_output_sound(game_state, game_sound)
 	}
 	render_gradient(game_offscreen_buffer, game_state)
 	render_player(game_offscreen_buffer, game_state.player_x, game_state.player_y)
+	game_mouse_input(&game_input.mouse, game_offscreen_buffer)
+}
+
+game_mouse_input :: proc(mouse: ^p.Game_Mouse, game_offscreen_buffer: ^p.Game_Offscreen_Buffer) {
+	mouse_buttons := mouse.buttons
+	for i in 0 ..< len(mouse_buttons) {
+		button := mouse_buttons[i]
+		if button.ended_down {
+			render_player(game_offscreen_buffer, 50 + i * 10, 50)
+		}
+	}
+	render_player(game_offscreen_buffer, cast(int)mouse.x, cast(int)mouse.y)
 }

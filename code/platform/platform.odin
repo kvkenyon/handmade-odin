@@ -51,7 +51,14 @@ Game_Controller_Input :: struct {
 	},
 }
 
+Game_Mouse :: struct {
+	x:       i32,
+	y:       i32,
+	buttons: [3]Game_Button_State,
+}
+
 Game_Input :: struct {
+	mouse:       Game_Mouse,
 	controllers: [5]Game_Controller_Input,
 }
 
