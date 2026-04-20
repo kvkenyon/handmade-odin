@@ -130,14 +130,35 @@ win32_copy_buffer_to_window :: proc "stdcall" (
 	window_width: INT,
 	window_height: INT,
 ) {
+	offset_x: INT = 10
+	offset_y: INT = 10
+	win.PatBlt(device_context, 0, 0, window_width, offset_y, win.BLACKNESS)
+	win.PatBlt(
+		device_context,
+		0,
+		offset_y + buffer.height,
+		window_width,
+		window_height,
+		win.BLACKNESS,
+	)
+	win.PatBlt(device_context, 0, 0, offset_x, window_height, win.BLACKNESS)
+	win.PatBlt(
+		device_context,
+		buffer.width + offset_x,
+		0,
+		window_width,
+		window_height,
+		win.BLACKNESS,
+	)
+
 	win.StretchDIBits(
 		device_context,
-		x,
-		y,
+		offset_x,
+		offset_y,
 		buffer.width,
 		buffer.height,
-		x,
-		y,
+		0,
+		0,
 		buffer.width,
 		buffer.height,
 		buffer.memory,
@@ -394,14 +415,6 @@ win32_process_pending_messages :: proc(
 	for win.PeekMessageW(&msg, nil, 0, 0, win.PM_REMOVE) {
 		if msg.message == win.WM_QUIT do RUNNING = false
 		switch msg.message {
-		// case win.WM_LBUTTONDOWN:
-		// 	mouse.buttons[0].ended_down = true
-		// case win.WM_LBUTTONUP:
-		// 	mouse.buttons[0].ended_down = false
-		// case win.WM_RBUTTONDOWN:
-		// 	mouse.buttons[1].ended_down = true
-		// case win.WM_RBUTTONUP:
-		// 	mouse.buttons[1].ended_down = false
 		case win.WM_KEYDOWN, win.WM_KEYUP, win.WM_SYSKEYUP, win.WM_SYSKEYDOWN:
 			vk_code := win.LOWORD(msg.wParam)
 			key_flags := win.HIWORD(msg.lParam)
@@ -436,18 +449,22 @@ win32_process_pending_messages :: proc(
 					win32_process_keyboard_message(&new_controller.right_shoulder, is_down)
 				case 'L':
 					if is_down {
-						if win32_state.input_recording_index == 0 {
-							win32_begin_input_recording(win32_state, 1)
-							assert(win32_state.input_recording_index == 1)
+						if win32_state.input_playback_index == 0 {
+							if win32_state.input_recording_index == 0 {
+								win32_begin_input_recording(win32_state, 1)
+								assert(win32_state.input_recording_index == 1)
+							} else {
+								win32_end_input_recording(win32_state)
+								win32_begin_input_playback(win32_state, 1)
+								assert(win32_state.input_playback_index == 1)
+							}
+
 						} else {
-							win32_end_input_recording(win32_state)
-							win32_begin_input_playback(win32_state, 1)
-							assert(win32_state.input_playback_index == 1)
+							win32_end_input_playback(win32_state)
 						}
 					}
 				case:
 					break
-
 				}
 			}
 		case:
@@ -472,6 +489,9 @@ win32_begin_input_recording :: proc(
 		0,
 		nil,
 	)
+	if win32_state.recording_handle == win.INVALID_HANDLE_VALUE {
+		win32_error_exit()
+	}
 	bytes_written: DWORD
 	result := win.WriteFile(
 		win32_state.recording_handle,
@@ -711,7 +731,7 @@ main :: proc() {
 	lp_cmd_line := win.GetCommandLineW()
 
 	cls := win.WNDCLASSW {
-		style         = win.CS_OWNDC | win.CS_HREDRAW | win.CS_VREDRAW,
+		style         = win.CS_HREDRAW | win.CS_VREDRAW,
 		lpszClassName = CLASS_NAME,
 		lpfnWndProc   = win32_main_window_callback,
 		hInstance     = instance,
@@ -777,10 +797,8 @@ main :: proc() {
 	hr := win.CoInitializeEx(nil, .MULTITHREADED)
 	assert(win.SUCCEEDED(hr), "CoInitializeEx failed")
 
-
 	msg: win.MSG
 
-	device_context := win.GetDC(window)
 
 	last_cycle_count: i64 = intrinsics.read_cycle_counter()
 
@@ -858,6 +876,8 @@ main :: proc() {
 			&new_input.mouse.buttons[1],
 			win.GetKeyState(win.VK_RBUTTON) < 0,
 		)
+
+		new_input.t_delta = target_seconds_per_frame
 
 		game_offscreen_buffer := p.Game_Offscreen_Buffer {
 			width           = bitmap_buffer.width,
@@ -945,6 +965,7 @@ main :: proc() {
 		mega_cycle_count := cast(f32)cycles_elapsed / (1000.0 * 1000.0)
 		last_cycle_count = end_cycle_count
 
+		device_context := win.GetDC(window)
 		window_width, window_height := win32_get_window_dimensions(window)
 		win32_copy_buffer_to_window(
 			device_context,
@@ -954,6 +975,7 @@ main :: proc() {
 			window_width,
 			window_height,
 		)
+		win.ReleaseDC(window, device_context)
 
 		Buff: [256]byte
 		dbg_str := strings.clone_to_cstring(

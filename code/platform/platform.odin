@@ -58,17 +58,16 @@ Game_Mouse :: struct {
 }
 
 Game_Input :: struct {
+	t_delta:     f32,
 	mouse:       Game_Mouse,
 	controllers: [5]Game_Controller_Input,
 }
 
 Game_State :: struct {
-	x_offset: int,
-	y_offset: int,
-	tone_hz:  f32,
-	phase:    f32,
-	player_x: int,
-	player_y: int,
+	player_x:       f32,
+	player_y:       f32,
+	player_world_x: u32,
+	player_world_y: u32,
 }
 
 Game_Memory :: struct {
