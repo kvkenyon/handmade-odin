@@ -662,7 +662,6 @@ Game_API :: struct {
 	api_version:       int,
 }
 
-
 copy_dll :: proc(to: string) -> bool {
 	exit := libc.system(fmt.ctprintf("copy game.dll {0}", to))
 	if exit != 0 {

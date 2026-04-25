@@ -40,9 +40,9 @@ Player :: struct {
 }
 
 Game_State :: struct {
+	world:  World,
 	player: Player,
 }
-
 
 player_position_left :: proc(player: ^Player) -> Position {
 	left: Position = player.position
@@ -65,7 +65,6 @@ get_tile_coordinates :: #force_inline proc(pos: ^Position, world: ^World) -> (i3
 	tile_y := i32(pos.screen_y / f32(world.tile_height))
 	return tile_x, tile_y
 }
-
 
 is_position_empty :: proc(pos: ^Position, world: ^World) -> bool {
 	tile_x, tile_y := get_tile_coordinates(pos, world)
@@ -223,17 +222,7 @@ game_output_sound :: proc(game_state: ^Game_State, sound_buffer: ^p.Game_Sound_B
 	// TODO(kevin): output sound
 }
 
-
-@(export)
-update_and_render :: proc(
-	game_memory: ^p.Game_Memory,
-	game_sound: ^p.Game_Sound_Buffer,
-	game_offscreen_buffer: ^p.Game_Offscreen_Buffer,
-	game_input: ^p.Game_Input,
-) {
-	assert(size_of(Game_State) <= game_memory.permanent_storage_size)
-	game_state := cast(^Game_State)game_memory.permanent_storage
-
+init_world :: proc() -> World {
 	tiles_00: [ROWS][COLS]u32 = {
 		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
 		{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1},
@@ -287,7 +276,6 @@ update_and_render :: proc(
 		tiles = &tiles_01[0][0],
 	}
 
-
 	tile_map_10 := Tile_Map {
 		tiles = &tiles_10[0][0],
 	}
@@ -308,6 +296,19 @@ update_and_render :: proc(
 		tile_maps     = &tile_maps[0][0],
 	}
 
+	return world
+}
+
+@(export)
+update_and_render :: proc(
+	game_memory: ^p.Game_Memory,
+	game_sound: ^p.Game_Sound_Buffer,
+	game_offscreen_buffer: ^p.Game_Offscreen_Buffer,
+	game_input: ^p.Game_Input,
+) {
+	assert(size_of(Game_State) <= game_memory.permanent_storage_size)
+	game_state := cast(^Game_State)game_memory.permanent_storage
+
 	if !game_memory.is_initialized {
 		game_memory.is_initialized = true
 		player_width := .75 * f32(TILE_WIDTH)
@@ -318,8 +319,10 @@ update_and_render :: proc(
 			position = Position{screen_x = 100, screen_y = 160, world_x = 0, world_y = 0},
 		}
 		game_state.player = player
+		game_state.world = init_world()
 	}
 
+	world := game_state.world
 
 	for controller in game_input.controllers {
 		if !controller.is_connected do continue
@@ -382,7 +385,6 @@ update_and_render :: proc(
 			draw_rectangle(game_offscreen_buffer, min_x, max_x, min_y, max_y, gray, gray, gray)
 		}
 	}
-
 
 	player_left := game_state.player.position.screen_x - (.5 * f32(game_state.player.width))
 	player_top := game_state.player.position.screen_y - f32(game_state.player.height)
