@@ -2,6 +2,7 @@ package game
 
 import p "../platform"
 
+
 /* Tile Map */
 
 ROWS :: 9
@@ -10,122 +11,158 @@ TILE_WIDTH :: 64
 TILE_HEIGHT :: 80
 
 World :: struct {
-	count_y:   u32,
-	count_x:   u32,
-	tile_maps: [^]Tile_Map,
+	world_count_y: i32,
+	world_count_x: i32,
+	tile_count_y:  i32,
+	tile_count_x:  i32,
+	tile_height:   i32,
+	tile_width:    i32,
+	tile_maps:     [^]Tile_Map,
 }
 
 Tile_Map :: struct {
-	count_y: u32,
-	count_x: u32,
-	height:  u32,
-	width:   u32,
-	tiles:   [^]u32,
+	tiles: [^]u32,
 }
 
-get_tile_coordinates :: #force_inline proc(x: f32, y: f32, tile_map: ^Tile_Map) -> (i32, i32) {
-	tile_x := i32(x / f32(tile_map.width))
-	tile_y := i32(y / f32(tile_map.height))
+Position :: struct {
+	// NOTE(kevin): Tile map indeces
+	world_x:  i32,
+	world_y:  i32,
+	// NOTE(Kevin): Pixel position
+	screen_x: f32,
+	screen_y: f32,
+}
+
+Player :: struct {
+	width:    i32,
+	height:   i32,
+	position: Position,
+}
+
+Game_State :: struct {
+	player: Player,
+}
+
+
+player_position_left :: proc(player: ^Player) -> Position {
+	left: Position = player.position
+	left.screen_x -= (0.5 * f32(player.width))
+	return left
+}
+
+player_position_right :: proc(player: ^Player) -> Position {
+	right: Position = player.position
+	right.screen_x += (0.5 * f32(player.width))
+	return right
+}
+
+get_tile_map :: proc(pos: ^Position, world: ^World) -> ^Tile_Map {
+	return &world.tile_maps[pos.world_x + pos.world_y * world.world_count_x]
+}
+
+get_tile_coordinates :: #force_inline proc(pos: ^Position, world: ^World) -> (i32, i32) {
+	tile_x := i32(pos.screen_x / f32(world.tile_width))
+	tile_y := i32(pos.screen_y / f32(world.tile_height))
 	return tile_x, tile_y
 }
 
 
-point_in_tile_map_is_open :: proc(x: f32, y: f32, tile_map: ^Tile_Map) -> bool {
-	tile_x, tile_y := get_tile_coordinates(x, y, tile_map)
-	return tile_map.tiles[u32(tile_x) + u32(tile_y) * tile_map.count_x] == 0
-}
-
-point_in_tile_map :: proc(x: f32, y: f32, tile_map: ^Tile_Map) -> bool {
-	tile_x, tile_y := get_tile_coordinates(x, y, tile_map)
+is_position_empty :: proc(pos: ^Position, world: ^World) -> bool {
+	tile_x, tile_y := get_tile_coordinates(pos, world)
+	tile_map := get_tile_map(pos, world)
 	return(
 		tile_x >= 0 &&
-		tile_x < i32(tile_map.count_x) &&
+		tile_x < i32(world.tile_count_x) &&
 		tile_y >= 0 &&
-		tile_y < i32(tile_map.count_y) \
+		tile_y < i32(world.tile_count_y) &&
+		tile_map.tiles[tile_x + tile_y * world.tile_count_x] == 0 \
 	)
 }
 
-point_is_open_in_world :: proc(
-	x: f32,
-	y: f32,
-	world_x: u32,
-	world_y: u32,
+is_world_position_empty :: proc(
+	player: ^Player,
+	position: ^Position,
 	world: ^World,
 ) -> (
 	bool,
-	u32,
-	u32,
-	f32,
-	f32,
+	Position,
 ) {
 
-	tile_map := world.tile_maps[world_x + world_y * 2]
+	player_left := player_position_left(player)
+	player_right := player_position_right(player)
 
-	if point_in_tile_map(x, y, &tile_map) {
-		return point_in_tile_map_is_open(x, y, &tile_map), world_x, world_y, x, y
+	if is_position_empty(position, world) &&
+	   is_position_empty(&player_left, world) &&
+	   is_position_empty(&player_right, world) {
+		return true, position^
 	}
 
-	tile_x, tile_y := get_tile_coordinates(x, y, &tile_map)
+	tile_x, tile_y := get_tile_coordinates(position, world)
 
-	new_x := x
-	new_y := y
-	d_world_x: u32 = 0
-	d_world_y: u32 = 0
+	new_pos: Position = position^
 
-	tile_map_width := f32(tile_map.count_x * tile_map.width)
-	tile_map_height := f32(tile_map.count_y * tile_map.height)
+	tile_map_width := world.tile_width * world.tile_count_x
+	tile_map_height := world.tile_height * world.tile_count_y
 
 	if tile_x < 0 {
 		// to the left
-		tile_x = i32(tile_map.count_x) + tile_x
-		d_world_x -= 1
-		if world_x == 0 {
-			return false, world_x, world_y, x, y
+		tile_x = i32(world.tile_count_x) + tile_x
+		if position.world_x == 0 {
+			return false, new_pos
 		}
-		new_x = tile_map_width + x
-	} else if tile_x >= i32(tile_map.count_x) {
+		new_pos.world_x = position.world_x - 1
+		new_pos.screen_x = f32(tile_map_width) + position.screen_x
+	} else if tile_x > world.tile_count_x - 1 {
 		// to the right
-		tile_x = tile_x % i32(tile_map.count_x)
-		d_world_x += 1
-		if world_x == COLS - 1 {
-			return false, world_x, world_y, x, y
+		tile_x = tile_x % world.tile_count_x
+		if position.world_x == world.tile_count_x - 1 {
+			return false, new_pos
 		}
-		new_x := x - tile_map_width
+		new_pos.world_x = position.world_x + 1
+		new_pos.screen_x = position.screen_x - f32(tile_map_width)
+	} else if tile_x == 0 {
+		// to the left
+		tile_x = world.tile_count_x - 1
+		if position.world_x == 0 {
+			return false, new_pos
+		}
+		new_pos.world_x -= 1
+		new_pos.screen_x = f32(tile_map_width) + position.screen_x
+	} else if tile_x == world.tile_count_x - 1 {
+		// to the right
+		tile_x = 0
+		if position.world_x == world.tile_count_x - 1 {
+			return false, new_pos
+		}
+		new_pos.world_x = position.world_x + 1
+		new_pos.screen_x = position.screen_x - f32(tile_map_width)
+		if new_pos.screen_x < 0 do new_pos.screen_x = 0
 	}
 
 	if tile_y < 0 {
 		// to the top
-		tile_y = i32(tile_map.count_y) + tile_y
-		d_world_y -= 1
-		if world_y == 0 {
-			return false, world_x, world_y, x, y
+		tile_y = world.tile_count_y + tile_y
+		if position.world_y == 0 {
+			return false, new_pos
 		}
-		new_y = tile_map_height + y
-	} else if tile_y >= i32(tile_map.count_y) {
+		new_pos.world_y = position.world_y - 1
+		new_pos.screen_y = f32(tile_map_height) + position.screen_y
+	} else if tile_y >= world.tile_count_y {
 		// to the bottom
-		tile_y = tile_y % i32(tile_map.count_y)
-		d_world_y += 1
-		if world_y == 1 {
-			return false, world_x, world_y, x, y
+		tile_y = tile_y % world.tile_count_y
+		if position.world_y == 1 {
+			return false, new_pos
 		}
-		new_y = y - tile_map_height
-	}
-
-	new_world_x := world_x + d_world_x
-	new_world_y := world_y + d_world_y
-
-	tile_map = world.tile_maps[new_world_x + new_world_y * 2]
-
-	if tile_map.tiles[tile_x + tile_y * COLS] == 0 &&
-	   0 <= tile_x &&
-	   tile_x < i32(tile_map.count_x) &&
-	   0 <= tile_y &&
-	   tile_y < i32(tile_map.count_y) {
-		return true, new_world_x, new_world_y, new_x, new_y
+		new_pos.world_y = position.world_y + 1
+		new_pos.screen_y = position.screen_y - f32(tile_map_height)
 	}
 
 
-	return false, world_x, world_y, x, y
+	if is_position_empty(&new_pos, world) {
+		return true, new_pos
+	}
+
+	return false, new_pos
 }
 
 
@@ -182,7 +219,7 @@ draw_rectangle :: proc(
 
 /* Game Update */
 
-game_output_sound :: proc(game_state: ^p.Game_State, sound_buffer: ^p.Game_Sound_Buffer) {
+game_output_sound :: proc(game_state: ^Game_State, sound_buffer: ^p.Game_Sound_Buffer) {
 	// TODO(kevin): output sound
 }
 
@@ -194,11 +231,8 @@ update_and_render :: proc(
 	game_offscreen_buffer: ^p.Game_Offscreen_Buffer,
 	game_input: ^p.Game_Input,
 ) {
-	assert(size_of(p.Game_State) <= game_memory.permanent_storage_size)
-	game_state := cast(^p.Game_State)game_memory.permanent_storage
-
-	player_width := .75 * f32(TILE_WIDTH)
-	player_height := .5 * f32(TILE_HEIGHT)
+	assert(size_of(Game_State) <= game_memory.permanent_storage_size)
+	game_state := cast(^Game_State)game_memory.permanent_storage
 
 	tiles_00: [ROWS][COLS]u32 = {
 		{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
@@ -246,43 +280,49 @@ update_and_render :: proc(
 	}
 
 	tile_map_00 := Tile_Map {
-		count_x = COLS,
-		count_y = ROWS,
-		width   = TILE_WIDTH,
-		height  = TILE_HEIGHT,
-		tiles   = &tiles_00[0][0],
+		tiles = &tiles_00[0][0],
 	}
 
-	tile_map_01 := tile_map_00
-	tile_map_01.tiles = &tiles_01[0][0]
+	tile_map_01 := Tile_Map {
+		tiles = &tiles_01[0][0],
+	}
 
-	tile_map_10 := tile_map_00
-	tile_map_10.tiles = &tiles_10[0][0]
 
-	tile_map_11 := tile_map_00
-	tile_map_11.tiles = &tiles_11[0][0]
+	tile_map_10 := Tile_Map {
+		tiles = &tiles_10[0][0],
+	}
+
+	tile_map_11 := Tile_Map {
+		tiles = &tiles_11[0][0],
+	}
 
 	tile_maps: [2][2]Tile_Map = {{tile_map_00, tile_map_01}, {tile_map_10, tile_map_11}}
 
 	world := World {
-		count_x   = 2,
-		count_y   = 2,
-		tile_maps = &tile_maps[0][0],
+		world_count_x = 2,
+		world_count_y = 2,
+		tile_count_x  = COLS,
+		tile_count_y  = ROWS,
+		tile_width    = TILE_WIDTH,
+		tile_height   = TILE_HEIGHT,
+		tile_maps     = &tile_maps[0][0],
 	}
 
 	if !game_memory.is_initialized {
 		game_memory.is_initialized = true
-		game_state.player_x = 100.
-		game_state.player_y = 160.
-		game_state.player_world_x = 0
-		game_state.player_world_y = 0
+		player_width := .75 * f32(TILE_WIDTH)
+		player_height := .5 * f32(TILE_HEIGHT)
+		player := Player {
+			width = i32(player_width),
+			height = i32(player_height),
+			position = Position{screen_x = 100, screen_y = 160, world_x = 0, world_y = 0},
+		}
+		game_state.player = player
 	}
 
-	curr_tile_map := world.tile_maps[game_state.player_world_x + game_state.player_world_y * 2]
 
 	for controller in game_input.controllers {
 		if !controller.is_connected do continue
-
 		if (controller.is_analog) {
 			// NOTE(kevin): Use analog movement tuning
 		} else {
@@ -301,6 +341,7 @@ update_and_render :: proc(
 			}
 			if controller.move_right.ended_down {
 				d_player_x = 1.0
+				assert(d_player_x == 1.0)
 			}
 
 			d_player_x *= 128.0
@@ -309,35 +350,14 @@ update_and_render :: proc(
 			delta_x := game_input.t_delta * d_player_x // pixels/frame
 			delta_y := game_input.t_delta * d_player_y
 
-			world_x := game_state.player_world_x
-			world_y := game_state.player_world_y
+			pos := game_state.player.position
+			pos.screen_x += delta_x
+			pos.screen_y += delta_y
 
-			is_free, new_world_x, new_world_y, new_player_x, new_player_y :=
-				point_is_open_in_world(
-					game_state.player_x + delta_x,
-					game_state.player_y + delta_y,
-					world_x,
-					world_y,
-					&world,
-				)
+			is_free, new_pos := is_world_position_empty(&game_state.player, &pos, &world)
 
 			if is_free {
-				curr_tile_map = world.tile_maps[new_world_x + new_world_y * 2]
-				if point_in_tile_map_is_open(
-					   new_player_x - (player_width / 2),
-					   new_player_y,
-					   &curr_tile_map,
-				   ) &&
-				   point_in_tile_map_is_open(
-					   new_player_x + (player_width / 2),
-					   new_player_y,
-					   &curr_tile_map,
-				   ) {
-					game_state.player_x = new_player_x
-					game_state.player_y = new_player_y
-					game_state.player_world_x = new_world_x
-					game_state.player_world_y = new_world_y
-				}
+				game_state.player.position = new_pos
 			}
 		}
 	}
@@ -348,18 +368,15 @@ update_and_render :: proc(
 
 	game_mouse_input(&game_input.mouse, game_offscreen_buffer)
 
-	world_x := game_state.player_world_x
-	world_y := game_state.player_world_y
-
-	tile_map := world.tile_maps[world_x + world_y * 2]
-	for row in 0 ..< tile_map.count_y {
-		for col in 0 ..< tile_map.count_x {
+	tile_map := get_tile_map(&game_state.player.position, &world)
+	for row in 0 ..< world.tile_count_y {
+		for col in 0 ..< world.tile_count_x {
 			gray: f32 = 0.5
-			if tile_map.tiles[col + row * tile_map.count_x] == 1 {
+			if tile_map.tiles[col + row * world.tile_count_x] == 1 {
 				gray = 1.0
 			}
-			min_x := f32(col * tile_map.width)
-			min_y := f32(row * tile_map.height)
+			min_x := f32(col * world.tile_width)
+			min_y := f32(row * world.tile_height)
 			max_x := min_x + f32(TILE_WIDTH)
 			max_y := min_y + f32(TILE_HEIGHT)
 			draw_rectangle(game_offscreen_buffer, min_x, max_x, min_y, max_y, gray, gray, gray)
@@ -367,15 +384,15 @@ update_and_render :: proc(
 	}
 
 
-	player_left := game_state.player_x - (.5 * player_width)
-	player_top := game_state.player_y - player_height
+	player_left := game_state.player.position.screen_x - (.5 * f32(game_state.player.width))
+	player_top := game_state.player.position.screen_y - f32(game_state.player.height)
 
 	draw_rectangle(
 		game_offscreen_buffer,
 		player_left,
-		player_left + player_width,
+		player_left + f32(game_state.player.width),
 		player_top,
-		player_top + player_height,
+		player_top + f32(game_state.player.height),
 		1.0,
 		1.0,
 		0.0,

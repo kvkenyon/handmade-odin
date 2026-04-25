@@ -63,13 +63,6 @@ Game_Input :: struct {
 	controllers: [5]Game_Controller_Input,
 }
 
-Game_State :: struct {
-	player_x:       f32,
-	player_y:       f32,
-	player_world_x: u32,
-	player_world_y: u32,
-}
-
 Game_Memory :: struct {
 	is_initialized:         bool,
 	permanent_storage_size: u64,
